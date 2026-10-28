@@ -585,6 +585,13 @@ async function loadSecurity(){
   if(!s || typeof s.secure !== 'boolean') return;
   setText($('secbtn'), s.secure ? 'Security · ON' : 'Security');
   if(!$('sec').classList.contains('on')) return;
+  // secure mode without a valid token: the master says only that it is on
+  if(s.secure && !s.role){
+    setHTML($('secchips'), '<span class="chip ok">SECURE (RBAC + CSRF)</span>'
+      + '<span class="chip bad">role: unauthenticated</span>');
+    setHTML($('seclog'), '<div class="none">set a token to see the audit trail</div>');
+    return;
+  }
   const roleCls = s.role === 'admin' ? 'ok' : (s.role === 'reviewer' ? 'warn' : (s.secure ? 'bad' : ''));
   setHTML($('secchips'),
     `<span class="chip ${s.secure?'ok':'warn'}">${s.secure?'SECURE (RBAC + CSRF)':'OPEN MODE (audit-only)'}</span>`

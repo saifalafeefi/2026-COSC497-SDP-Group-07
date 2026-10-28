@@ -176,8 +176,9 @@ def find_python312() -> str | None:
     return None
 
 
-def http_json(url: str, timeout: float = 1.5):
-    with urllib.request.urlopen(url, timeout=timeout) as r:
+def http_json(url: str, timeout: float = 1.5, headers: dict | None = None):
+    req = urllib.request.Request(url, headers=headers or {})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode())
 
 
@@ -256,6 +257,8 @@ class App:
         self.gated: list = []                 # (widget, predicate) re-evaluated twice a second
         self.devices: list = []
         self.hotspot = "checking…"
+        self.tokens: dict = {}                # role -> token, from a --secure master's output
+        self._tokbuf = ""
         self.cr = False                       # last output ended in a bare \r
 
         root.title(APP)
@@ -433,14 +436,26 @@ class App:
         self.mode_hint = ttk.Label(f, text="", style="Dim.TLabel", wraplength=900, justify="left")
         self.mode_hint.pack(anchor="w", pady=(2, 4))
         self._mode_changed(save=False)
+        # --secure: the master makes an admin and a reviewer token each start and
+        # prints them; this app reads them from that output (see _drain)
+        self.secure = tk.BooleanVar(value=bool(self.cfg.get("secure", False)))
+        sec = ttk.Frame(f)
+        sec.pack(fill="x", anchor="w", pady=(0, 4))
+        ttk.Checkbutton(sec, text="Secure mode: the roster needs a token (admin changes "
+                                  "anything, reviewer only views and acknowledges flags)",
+                        variable=self.secure, command=self._secure_changed).pack(side="left")
         row = ttk.Frame(f)
         row.pack(fill="x", anchor="w", pady=(0, 12))
         self._btn(row, "▶  Start master", self.start_master,
                   when=lambda: self.ready() and not self.is_running("fleet"), big=True)
         self._btn(row, "■  Stop master", lambda: self.stop("fleet"),
                   when=lambda: self.is_running("fleet"))
-        self._btn(row, "Open roster", lambda: webbrowser.open(FLEET),
+        self._btn(row, "Open roster", self.open_roster,
                   when=lambda: self.is_running("fleet"))
+        self._btn(row, "Copy admin token", lambda: self.copy_token("admin"),
+                  when=lambda: self.is_running("fleet") and "admin" in self.tokens)
+        self._btn(row, "Copy reviewer token", lambda: self.copy_token("reviewer"),
+                  when=lambda: self.is_running("fleet") and "reviewer" in self.tokens)
 
         ttk.Label(f, text="Boards", style="Head.TLabel").pack(anchor="w")
         cols = ("board", "ip", "wearer", "finger", "bpm", "level", "state", "ondevice")
@@ -713,10 +728,39 @@ class App:
             save_config(self.cfg)
 
     def start_master(self):
+        self.tokens, self._tokbuf = {}, ""    # new tokens every start
+        sec = ["--secure"] if self.secure.get() else []
+        tag = ", secure" if sec else ""
         if self.net_mode.get() == "hotspot":
-            self.run("fleet", "Master (%s's hotspot)" % THIS_PC, ["-m", "anomaly.fleet", "--hotspot"])
+            self.run("fleet", "Master (%s's hotspot%s)" % (THIS_PC, tag),
+                     ["-m", "anomaly.fleet", "--hotspot"] + sec)
         else:
-            self.run("fleet", "Master (shared WiFi)", ["-m", "anomaly.fleet"])
+            self.run("fleet", "Master (shared WiFi%s)" % tag, ["-m", "anomaly.fleet"] + sec)
+
+    def _secure_changed(self):
+        self.cfg["secure"] = self.secure.get()
+        save_config(self.cfg)
+        if self.is_running("fleet"):
+            self._write("\n(secure mode takes effect the next time the master starts)\n", "head")
+
+    def _catch_tokens(self, text):
+        """pick the master's '<role> token: <tok>' lines out of its output."""
+        if not self.is_running("fleet") or len(self.tokens) == 2:
+            return
+        self._tokbuf = (self._tokbuf + text)[-4000:]
+        for role, tok in re.findall(r"\b(admin|reviewer)\s+token:\s*(\S+)", self._tokbuf):
+            self.tokens[role] = tok
+
+    def copy_token(self, role):
+        self.root.clipboard_clear()
+        self.root.clipboard_append(self.tokens[role])
+        self._write("\n%s token copied. In the roster: Security > Set token, then paste.\n" % role,
+                    "head")
+
+    def open_roster(self):
+        webbrowser.open(FLEET)
+        if "admin" in self.tokens:
+            self.copy_token("admin")
 
     def _board_picked(self, _e=None):
         d = self._selected_device()
@@ -1016,9 +1060,14 @@ class App:
 
     def _poll_fleet(self):
         if self.is_running("fleet"):
+            # in secure mode, read with the reviewer token: it can only look
+            tok = self.tokens.get("reviewer") or self.tokens.get("admin")
+            hdr = {"X-Pulse-Token": tok} if tok else None
+
             def go():
                 try:
-                    self.q.put(("devices", http_json(FLEET + "/api/devices").get("devices", [])))
+                    self.q.put(("devices", http_json(FLEET + "/api/devices", headers=hdr)
+                                .get("devices", [])))
                 except Exception:
                     self.q.put(("devices", None))
             threading.Thread(target=go, daemon=True).start()
@@ -1064,6 +1113,7 @@ class App:
                 kind = msg[0]
                 if kind == "out":
                     self._write(msg[1])
+                    self._catch_tokens(msg[1])
                 elif kind == "exit":
                     _, key, rc = msg
                     job = self.jobs.get(key)

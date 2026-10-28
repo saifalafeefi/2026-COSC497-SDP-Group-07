@@ -131,3 +131,31 @@ def test_rate_limit_lockout_429(tmp_path):
     # 4th attempt is locked out with 429 even if a valid token is presented
     assert c.post("/api/tuning", headers=h("admin-tok")).status_code == 429
 
+
+def test_tokenless_polling_never_locks_out(tmp_path):
+    # an open roster tab polls with no token until one is typed in
+    c, sec, log = make(tmp_path)
+    sec.max_failures = 3
+    for _ in range(20):
+        assert c.get("/api/subjects").status_code == 401
+    assert c.get("/api/subjects", headers=h("admin-tok")).status_code == 200
+    assert not os.path.exists(log) or open(log).read() == ""   # reads not logged
+
+
+def test_403s_never_lock_out(tmp_path):
+    # a reviewer clicking what they cannot change, or a cross-site page
+    # riding the admin's browser, must not lock the admin out
+    c, sec, _ = make(tmp_path)
+    sec.max_failures = 3
+    for _ in range(5):
+        assert c.post("/api/tuning", headers=h("rev-tok")).status_code == 403
+        assert c.post("/api/tuning", headers=h("admin-tok", "http://evil.example")).status_code == 403
+    assert c.post("/api/tuning", headers=h("admin-tok")).status_code == 200
+
+
+def test_status_hides_log_without_token(tmp_path):
+    c, _, _ = make(tmp_path)
+    c.post("/api/tuning")
+    assert c.get("/api/security").json() == {"secure": True, "role": None}
+    assert c.get("/api/security", headers=h("admin-tok")).json()["entries"] == 1
+

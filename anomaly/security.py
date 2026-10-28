@@ -11,8 +11,16 @@ whose Origin is not this master -> 403 (blocks cross-site request forgery
 from a page the supervisor happens to have open). The page itself (`/`) stays
 public; it asks for a token on the first 401.
 
+Only wrong tokens count toward the brute-force lockout (10 a minute per IP ->
+429). A request with no token is a page that has not been given one yet, and
+a 403 comes from someone holding a real token (or a cross-site page riding the
+supervisor's own browser); counting those locked the whole machine out within
+seconds of opening the roster, and would let any web page do the same.
+
 Every /api/* write -- allowed or refused, secure mode or not -- is appended to
-data/audit_log.jsonl. Each line carries the SHA-256 of the line before it, so
+data/audit_log.jsonl, and so is every refusal of a request that carried a
+token. A read refused for carrying no token is not logged: an open roster tab
+polls twice a second. Each line carries the SHA-256 of the line before it, so
 editing or deleting an entry breaks the chain:
 
     python -m anomaly.security verify [path]
@@ -146,20 +154,24 @@ class Security:
             return 429, "rate limit exceeded (brute-force lockout)", None
         role = self.role_for(token)
         if role is None:
-            self._record_failure(ip, now)
+            if token:                       # a guess; no token at all is not one
+                self._record_failure(ip, now)
             return 401, "missing or invalid token", None
+        # the two 403s are not guesses, so they never count toward the lockout
         if method in _WRITE:
             if origin and host and origin.split("://", 1)[-1] != host:
-                self._record_failure(ip, now)
                 return 403, f"cross-origin write from {origin}", role
             if role == "reviewer" and not any(p.match(path) for p in _REVIEWER_WRITES):
-                self._record_failure(ip, now)
                 return 403, "reviewer role cannot change this", role
         return 0, "ok", role
 
     def status(self, token: str | None = None) -> dict:
-        ok, n, msg = verify(self.log.path)
         role = self.role_for(token) if self.secure else "open"
+        if self.secure and role is None:
+            # the page needs to know secure mode is on before it has a token;
+            # it does not need the log (IPs, paths, roles) to know that
+            return {"secure": True, "role": None}
+        ok, n, msg = verify(self.log.path)
         return {"secure": self.secure, "role": role,
                 "allowed": self.allowed, "denied": self.denied,
                 "chain_ok": ok, "chain": msg, "entries": n,
@@ -184,8 +196,11 @@ def install(app, sec: Security):
             request.headers.get("origin"), request.headers.get("host"), ip=ip)
         if status:
             sec.denied += 1
-            sec.log.append(ip=ip, method=method, path=path, role=role,
-                           result=status, reason=reason)
+            # a read refused for carrying no token is a page still waiting for
+            # one, not an event: logging those wrote two lines a second per tab
+            if method in _WRITE or request.headers.get("x-pulse-token"):
+                sec.log.append(ip=ip, method=method, path=path, role=role,
+                               result=status, reason=reason)
             return JSONResponse({"error": f"{status}: {reason}"}, status_code=status)
         resp = await call_next(request)
         if method in _WRITE:
