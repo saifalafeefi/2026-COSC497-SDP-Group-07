@@ -99,16 +99,46 @@
   /* a protocol session in progress */
   .proto{background:#2a1d33;border:1px solid #4a3560;border-radius:8px;padding:9px 11px;
          margin-top:13px;font-size:13px;font-variant-numeric:tabular-nums}
+  /* security: RBAC, CSRF guard, and SHA-256 hash-chained audit trail */
+  #sec{padding:0 22px 4px;display:none}
+  #sec.on{display:block}
+  .secchips{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0;align-items:center}
+  .chip{background:#131a22;border:1px solid var(--line);border-radius:6px;
+        padding:4px 10px;font-size:12px;font-variant-numeric:tabular-nums}
+  .chip.ok{border-color:var(--ok);color:var(--ok)}
+  .chip.bad{border-color:var(--bad);color:var(--bad)}
+  .chip.warn{border-color:var(--warn);color:var(--warn)}
+  .seclog{background:#131a22;border:1px solid var(--line);border-radius:8px;
+          padding:8px 12px;max-height:190px;overflow:auto;font:12px/1.6 ui-monospace,Consolas,monospace}
+  .secrow{display:flex;gap:10px;border-bottom:1px solid #1d2630;padding:2px 0;white-space:nowrap}
+  .secrow:last-child{border-bottom:0}
 </style>
 
 <header>
   <h1>Pulse Fleet</h1>
   <div class="sub" id="sub">scanning…</div>
+  <button id="secbtn">Security</button>
   <button id="tunebtn">Tuning</button>
   <button id="newsub">New subject</button>
   <button id="rescan">Rescan</button>
 </header>
 <div id="stale" hidden></div>
+<section id="sec">
+  <div class="tunecard">
+    <div class="tunehead">
+      <h2>Security &amp; Audit Trail</h2>
+      <span>opt-in RBAC (<code>--secure</code>), Origin CSRF guard, and SHA-256 hash-chained log</span>
+    </div>
+    <div class="secchips" id="secchips"></div>
+    <div class="seclog" id="seclog"><div class="none">no audit events yet</div></div>
+    <div class="tunefoot">
+      <button id="sectok">Set token</button>
+      <button id="secclr">Clear token</button>
+      <button id="secprobe">Test unauthorized write</button>
+      <span id="secstat"></span>
+    </div>
+  </div>
+</section>
 <section id="tune">
   <div class="tunecard">
     <div class="tunehead">
@@ -366,12 +396,24 @@ function updateCard(d){
 
 // ---------------------------------------------------------------- actions
 
+function apiFetch(url, opt){
+  opt = opt || {};
+  opt.headers = Object.assign({}, opt.headers || {});
+  const tok = sessionStorage.getItem('pulse_token');
+  if(tok && !('X-Pulse-Token' in opt.headers)) opt.headers['X-Pulse-Token'] = tok;
+  return fetch(url, opt);
+}
+
 async function req(url, method, body){
   const opt = {method: method || 'POST', headers:{'Content-Type':'application/json'}};
   if(method !== 'DELETE' || body) opt.body = JSON.stringify(body || {});
   let r;
-  try{ r = await fetch(url, opt); }
+  try{ r = await apiFetch(url, opt); }
   catch(e){ alert(['Could not reach the master.', '', String(e)].join('\n')); return null; }
+  if(r.status === 401){
+    const t = prompt('Secure mode requires an X-Pulse-Token (printed in the master terminal):');
+    if(t){ sessionStorage.setItem('pulse_token', t.trim()); return req(url, method, body); }
+  }
   const j = await r.json().catch(() => ({}));
   if(!r.ok){
     // 404/405 on an endpoint this page knows about means the master is running
@@ -516,7 +558,8 @@ function tuneRow(t){
 
 async function loadTuning(){
   let r;
-  try{ r = await (await fetch('/api/tuning')).json(); }catch(e){ return; }
+  try{ r = await (await apiFetch('/api/tuning')).json(); }catch(e){ return; }
+  if(!r.tuning) return;
   if(!tuneDefaults) tuneDefaults = Object.fromEntries(r.tuning.map(t => [t.key, t.value]));
   const g = $('tunegrid');
   g.innerHTML = '';
@@ -534,17 +577,71 @@ $('tunereset').onclick = async () => {
   setText($('tunestat'), 'reset to the values this master started with');
 };
 
+// ---------------------------------------------------------------- security
+
+async function loadSecurity(){
+  let s;
+  try{ s = await (await apiFetch('/api/security')).json(); }catch(e){ return; }
+  if(!s || typeof s.secure !== 'boolean') return;
+  setText($('secbtn'), s.secure ? 'Security · ON' : 'Security');
+  if(!$('sec').classList.contains('on')) return;
+  const roleCls = s.role === 'admin' ? 'ok' : (s.role === 'reviewer' ? 'warn' : (s.secure ? 'bad' : ''));
+  setHTML($('secchips'),
+    `<span class="chip ${s.secure?'ok':'warn'}">${s.secure?'SECURE (RBAC + CSRF)':'OPEN MODE (audit-only)'}</span>`
+    + `<span class="chip ${roleCls}">role: ${esc(s.role || 'unauthenticated')}</span>`
+    + `<span class="chip ${s.chain_ok?'ok':'bad'}">${s.chain_ok?'✓ SHA-256 chain ':'✗ '}${esc(s.chain)}</span>`
+    + `<span class="chip">allowed writes: ${s.allowed}</span>`
+    + `<span class="chip ${s.denied?'bad':''}">blocked: ${s.denied}</span>`);
+  const rows = (s.recent || []).slice().reverse();
+  setHTML($('seclog'), rows.length ? rows.map(e => {
+    const bad = e.result >= 400;
+    const t = new Date(e.ts * 1000).toTimeString().slice(0,8);
+    return `<div class="secrow">`
+      + `<span style="color:var(--dim)">${t}</span>`
+      + `<span style="color:var(${bad?'--bad':'--ok'});font-weight:650">${e.result}</span>`
+      + `<span>${esc(e.method)} ${esc(e.path)}</span>`
+      + `<span style="color:var(--dim)">role=${esc(e.role||'none')} · ${esc(e.reason||'')}</span>`
+      + `<span style="margin-left:auto;color:var(--dim)" title="prev=${esc(e.prev)}">sha256:${esc((e.hash||'').slice(0,12))}…</span>`
+      + `</div>`;
+  }).join('') : '<div class="none">no audit events yet</div>');
+}
+
+$('secbtn').onclick = () => { $('sec').classList.toggle('on'); loadSecurity(); };
+$('sectok').onclick = () => {
+  const t = prompt('Enter X-Pulse-Token (admin or reviewer token from terminal):',
+                   sessionStorage.getItem('pulse_token') || '');
+  if(t === null) return;
+  sessionStorage.setItem('pulse_token', t.trim());
+  setText($('secstat'), 'token saved in sessionStorage');
+  loadSecurity(); refreshSubjects(); tick(); refreshEvents();
+};
+$('secclr').onclick = () => {
+  sessionStorage.removeItem('pulse_token');
+  setText($('secstat'), 'token cleared');
+  loadSecurity();
+};
+$('secprobe').onclick = async () => {
+  const r = await fetch('/api/tuning', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json', 'X-Pulse-Token':'forged-token'},
+    body: JSON.stringify({k_sigma: 9.9})
+  });
+  const j = await r.json().catch(() => ({}));
+  setText($('secstat'), `probe result: HTTP ${r.status} (${j.error || 'allowed in open mode'})`);
+  loadSecurity();
+};
+
 // ---------------------------------------------------------------- polling
 
 async function refreshSubjects(){
-  try{ subjects = (await (await fetch('/api/subjects')).json()).subjects; }catch(e){}
+  try{ subjects = (await (await apiFetch('/api/subjects')).json()).subjects || []; }catch(e){}
 }
 
 // events change far slower than the stream, so they get their own slower loop
 async function refreshEvents(){
   for(const d of devices){
-    try{ events[d.id] = (await (await fetch(`/api/devices/${d.id}/events?limit=8`))
-                          .json()).events; }catch(e){}
+    try{ events[d.id] = (await (await apiFetch(`/api/devices/${d.id}/events?limit=8`))
+                          .json()).events || []; }catch(e){}
   }
 }
 
@@ -581,9 +678,14 @@ function subjectsPanel(){
 
 let emptyEl = null;
 async function tick(){
+  loadSecurity();
   let r;
-  try{ r = await (await fetch('/api/devices')).json(); }
+  try{ r = await (await apiFetch('/api/devices')).json(); }
   catch(e){ setText($('sub'), 'master unreachable'); return; }
+  if(!r || !Array.isArray(r.devices)){
+    setText($('sub'), 'secure mode — click Security → Set token');
+    return;
+  }
   devices = r.devices;
   const stale = $('stale');
   if(r.api !== NEEDS_API){

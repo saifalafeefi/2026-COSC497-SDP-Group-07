@@ -1,0 +1,26 @@
+{
+  "n_iter": 400,
+  "decide_open_ms_median": 0.00095,
+  "decide_rbac_read_ms_median": 0.00465,
+  "decide_rbac_write_ms_median": 0.0027,
+  "audit_append_ms_median": 0.296,
+  "audit_append_ms_p95": 0.538,
+  "chain_sizes": [
+    100,
+    250,
+    500,
+    1000,
+    1500,
+    2000,
+    2500
+  ],
+  "chain_verify_ms": [
+    1.377,
+    4.92,
+    13.548,
+    21.769,
+    21.174,
+    23.236,
+    29.548
+  ]
+}

@@ -1387,7 +1387,13 @@ async def amain(args) -> int:
 
     import uvicorn
     print(f"\n  roster -> http://localhost:{args.port}\n")
-    cfg = uvicorn.Config(build_app(fleet), host="0.0.0.0", port=args.port,
+    from .security import Security, install
+    sec = Security(secure=args.secure)
+    if sec.secure:
+        print("  SECURE MODE: send X-Pulse-Token on every /api call", flush=True)
+        for role, tok in sec.tokens.items():
+            print(f"    {role:8s} token: {tok}", flush=True)
+    cfg = uvicorn.Config(install(build_app(fleet), sec), host="0.0.0.0", port=args.port,
                          log_level="warning")
     await uvicorn.Server(cfg).serve()
     return 0
@@ -1405,6 +1411,8 @@ def main() -> int:
     ap.add_argument("--hotspot", action="store_true",
                     help="switch this machine's hotspot on (Windows Mobile Hotspot / "
                          "macOS Internet Sharing), scan it, and keep it on")
+    ap.add_argument("--secure", action="store_true",
+                    help="require role tokens on /api (admin / reviewer); see anomaly/security.py")
     args = ap.parse_args()
     try:
         return asyncio.run(amain(args))
