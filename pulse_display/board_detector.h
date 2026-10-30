@@ -1,4 +1,4 @@
-// The on-device stress detector: movement gate -> 10 features -> Mahalanobis
+// The on-device stress detector: movement gate -> pulse features -> heart rate
 // -> the live self-referencing scale. Plain C++, no Arduino, no allocation:
 // the sketch hands it one arena (PSRAM) and a 1 Hz tick.
 //
@@ -10,9 +10,11 @@
 // board_model.h, which that script generates; edit neither by hand without
 // re-running both checks.
 //
-// What it costs against the host: PR-AUC 0.635 vs 0.706 on WESAD LOSO (the
-// baseline row in anomaly/RESULTS.md). What it buys: a verdict with no master,
-// and a raw waveform that never has to leave the board.
+// The score is the heart rate, and the scale only flags it going UP from the
+// wearer's own recent calm. On WESAD LOSO that scores PR-AUC 0.865 against the
+// host autoencoder's 0.706 and the 10-feature Mahalanobis it replaced (0.635)
+// -- `python -m anomaly.run --model hr`. All ten features are still computed:
+// the self-test checks every one, and the other nine cost nothing that matters.
 #pragma once
 
 #include <math.h>
@@ -333,19 +335,10 @@ static inline void bd_features(BdWork *w, const float *x, float f[BD_NF]) {
   f[8] = (float)(-ent / log((double)BD_NBINS));
 }
 
-// squared Mahalanobis from the WESAD calm Gaussian, then its root: the distance
-// reads more linearly for the live scale, and every metric that matters is rank-based
-static inline float bd_score(const float f[BD_NF]) {
-  float z[BD_NF];
-  for (int i = 0; i < BD_NF; i++) {
-    float v = isnan(f[i]) ? BD_MEDIAN[i] : f[i];
-    z[i] = (v - BD_MU[i]) / BD_SD[i] - BD_CENTER[i];
-  }
-  double m = 0.0;
-  for (int i = 0; i < BD_NF; i++)
-    for (int j = 0; j < BD_NF; j++) m += (double)z[i] * BD_INVCOV[i][j] * (double)z[j];
-  return (float)sqrt(m > 0.0 ? m : 0.0);
-}
+// the heart rate in bpm, NAN when the window has fewer than three pulses. no
+// fitted numbers: the live scale compares it with this wearer's own recent
+// calm, and z only counts upward, so a falling HR never flags
+static inline float bd_score(const float f[BD_NF]) { return f[0]; }
 
 // ------------------------------------------------------------ movement gate
 // anomaly/quality.clean_window: drop the loud seconds, back-fill from older

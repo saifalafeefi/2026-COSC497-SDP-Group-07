@@ -6,6 +6,7 @@ the held-out subject's normal + stress windows, and report PR-AUC + recall@90%
 specificity. aggregates as mean ± std across subjects — the honest number.
 
     python3 -m anomaly.run --model baseline                  # all 15 subjects
+    python3 -m anomaly.run --model hr                        # heart rate up (the board's)
     python3 -m anomaly.run --model ae --epochs 30
     python3 -m anomaly.run --model baseline --max-subjects 3  # quick check
 
@@ -64,6 +65,9 @@ def make_detector(args, win_len):
     if args.model == "baseline":
         from .baseline import MahalanobisDetector
         return MahalanobisDetector(fs=64)
+    if args.model == "hr":
+        from .baseline import HeartRateDetector
+        return HeartRateDetector(fs=64)
     if args.model == "ae":
         from .autoencoder import AEDetector
         return AEDetector(win_len=win_len, epochs=args.epochs,
@@ -75,7 +79,7 @@ def make_detector(args, win_len):
 
 def main():
     ap = argparse.ArgumentParser(description="LOSO one-class stress detection on WESAD")
-    ap.add_argument("--model", choices=["baseline", "ae", "ssl"], default="baseline")
+    ap.add_argument("--model", choices=["baseline", "hr", "ae", "ssl"], default="baseline")
     ap.add_argument("--win", type=float, default=60.0, help="window seconds")
     ap.add_argument("--step", type=float, default=5.0, help="step seconds")
     ap.add_argument("--epochs", type=int, default=30, help="AE epochs")

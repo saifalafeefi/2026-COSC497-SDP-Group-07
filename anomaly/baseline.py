@@ -51,3 +51,33 @@ class MahalanobisDetector:
         F = self._impute_standardize(F, fit=False)
         d = F - self.center_
         return np.einsum("ij,jk,ik->i", d, self.inv_cov_, d)   # squared Mahalanobis
+
+
+class HeartRateDetector:
+    """score = pulse rate, one-sided: only HR going UP reads as anomalous.
+
+    the 10-feature Mahalanobis is two-sided and spreads its weight over shape
+    and spectrum features that barely move under stress (and HRV from wrist
+    BVP moves the WRONG way on WESAD -- peak jitter while talking). HR rising
+    above calm is the one direction stress pushes. nothing is learned: within
+    a person, ranking by HR is the score, and on the device the live scale
+    measures it against that person's own recent calm. this is what the board
+    runs (board_detector.h). windows with too few pulses get the train median.
+    """
+
+    def __init__(self, fs: int = 64):
+        self.fs = fs
+
+    def fit(self, normal_windows: np.ndarray):
+        return self.fit_features(extract_batch(normal_windows, self.fs))
+
+    def score(self, windows: np.ndarray) -> np.ndarray:
+        return self.score_features(extract_batch(windows, self.fs))
+
+    def fit_features(self, F: np.ndarray):
+        self.median_ = float(np.nanmedian(F[:, 0]))
+        return self
+
+    def score_features(self, F: np.ndarray) -> np.ndarray:
+        hr = F[:, 0].astype(float)
+        return np.where(np.isnan(hr), self.median_, hr)

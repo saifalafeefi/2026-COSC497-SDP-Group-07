@@ -26,7 +26,7 @@
 // Set STREAM_ENABLED to 0 to get the old chatty human-readable debug prints.
 //
 // ON-DEVICE DETECTION. board_detector.h scores the conditioned stream once a
-// second on this board -- movement gate, features, Mahalanobis, the same live
+// second on this board -- movement gate, heart rate, the same live
 // scale the master uses -- so a verdict exists with no master at all. The
 // master's verdict still wins whenever it is fresh (it runs the bigger model);
 // the board's own fills the gap and is marked ON-DEVICE. It needs PSRAM:
@@ -661,7 +661,7 @@ enum { BD_ST_OFF = 0, BD_ST_IDLE, BD_ST_WARM, BD_ST_HOLD, BD_ST_OK };
 static const char *BD_ST_NAME[] = {"off", "idle", "warm", "hold", "ok"};
 volatile int8_t bdStateId = BD_ST_OFF;
 volatile float bdLevel = -1.0f;              // 0..1, or -1 while there is none
-volatile float bdScore = 0.0f;               // Mahalanobis distance, raw
+volatile float bdScore = 0.0f;               // heart rate, bpm: what the scale reads
 volatile int8_t bdFlag = 0;
 volatile int32_t bdWait = 0;                 // seconds until it can say anything
 volatile uint32_t bdMs = 0;                  // what the last tick cost
@@ -750,6 +750,13 @@ void bdTick() {
   float f[BD_NF];
   bd_features(&bdW, bdW.win, f);
   float sc = bd_score(f);
+  if (isnan(sc)) {                           // too few pulses to read a rate
+    bdHolds = bdHolds + 1;
+    bdStateId = BD_ST_HOLD;                  // hold, as for movement
+    bdMs = millis() - t0;
+    bdTickMs = millis();
+    return;
+  }
   bd_scale_apply(&bdS, sc, hostSens, bdW.dbuf);
   bdScore = sc;
   if (bdS.has_level) {

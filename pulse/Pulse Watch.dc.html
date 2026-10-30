@@ -422,6 +422,11 @@ input{font-family:inherit}
           </sc-for>
         </div>
         <div style="background:#fff;border:1px solid #E6EBF2;border-radius:16px;padding:18px;margin-top:14px">
+          <div style="font-weight:700;font-size:16px">Which detector catches stress best</div>
+          <canvas ref="{{ methodCmpRef }}" style="width:100%;height:250px;display:block;margin-top:12px"></canvas>
+          <div style="font-size:13px;color:#6B7787;margin-top:8px;line-height:1.55">Mean PR-AUC over the 15 WESAD subjects, each tested on a detector built without them. Counting only a <b style="color:#1B2430">rise</b> in heart rate beats every model: stress pushes the rate up, while the older detectors flag a falling rate too. A larger autoencoder buys nothing. The autoencoder scores 0.732 in this run against 0.706 in the original one, so differences of about 0.03 are noise.</div>
+        </div>
+        <div style="background:#fff;border:1px solid #E6EBF2;border-radius:16px;padding:18px;margin-top:14px">
           <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
             <div style="font-weight:700;font-size:16px">Per-user calibration, per subject</div>
             <div style="display:flex;align-items:center;gap:14px">
@@ -433,7 +438,7 @@ input{font-family:inherit}
           <div style="font-size:13px;color:#6B7787;margin-top:8px;line-height:1.55">PR-AUC for each WESAD subject: 1 is perfect separation of stress from calm, chance is about 0.35. Grey is the detector built on other people (zero-shot); green is the same detector after calibrating on the first half of that person's own calm, tested on the rest plus all their stress. The number above each pair is the change. Mean 0.750 → 0.867. Three people get worse (S10, S13, S15) when their calm slice is small or noisy. Statistical baseline (Mahalanobis), not the deployed autoencoder.</div>
         </div>
         <div style="background:#EEF4FF;border:1px solid #DBE6FB;border-radius:16px;padding:16px;margin-top:14px;font-size:13px;color:#3A4D6B;line-height:1.6">
-          <b style="color:#1B2430">Honest about limits.</b> Trained on calm data, so it flags the unfamiliar — it cannot name a cause. It is sensitivity-first and raises some false alarms by design. An early-warning aid, not a diagnostic device; every flag is reviewed by a person. Every number here is from WESAD (a public wrist dataset); this device has not been through the stress protocol yet, so it has no numbers of its own.
+          <b style="color:#1B2430">Honest about limits.</b> Trained on calm data, so it flags the unfamiliar — it cannot name a cause. It is sensitivity-first and raises some false alarms by design. The board's score is heart rate, so anything that raises it can flag: walking, stairs, caffeine, talking. There is no accelerometer yet to tell effort from stress. An early-warning aid, not a diagnostic device; every flag is reviewed by a person. Every number here is from WESAD (a public wrist dataset); this device has not been through the stress protocol yet, so it has no numbers of its own.
         </div>
       </div>
     </sc-if>
@@ -563,17 +568,18 @@ class Component extends DCLogic {
   trendRef = React.createRef();
   historyRef = React.createRef();
   methodRef = React.createRef();
+  methodCmpRef = React.createRef();
   calibRef = React.createRef();
   gaugeRef = React.createRef();
   _personalized = false;
 
   METHOD = {
     stats:[
-      // anomaly/RESULTS.md: the deployed autoencoder (bottleneck 256, ch-cap 32),
-      // leave-one-subject-out, and the per-user calibration table
-      {label:'PR-AUC',value:'0.706',sub:'deployed model, on people it never saw · chance ≈ 0.35'},
-      {label:'Recall @ 90% specificity',value:'0.545',sub:'stress caught while 1 calm window in 10 is flagged'},
-      {label:'Per-person spread',value:'±0.206',sub:'std of that PR-AUC across the 15 people'},
+      // anomaly/RESULTS.md, leave-one-subject-out: the board's heart-rate rule,
+      // the master's autoencoder (bottleneck 256, ch-cap 32), and calibration
+      {label:'On the board · heart rate up',value:'0.865',sub:'PR-AUC on people it never saw · recall 0.813 at 90% specificity · chance ≈ 0.35'},
+      {label:'On the master · autoencoder',value:'0.706',sub:'PR-AUC · recall 0.545 at 90% specificity · its verdict wins while the PC is connected'},
+      {label:'Per-person spread',value:'±0.154',sub:'std of the heart-rate PR-AUC across the 15 people (autoencoder ±0.206)'},
       {label:'Calibration gain',value:'+0.117',sub:'PR-AUC 0.750 → 0.867 on own calm · recall 0.46 → 0.69'}
     ],
     // `./run anomaly.calibrate`, PR-AUC per subject: zero-shot vs calibrated
@@ -582,7 +588,14 @@ class Component extends DCLogic {
               {s:'S8',zs:0.506,cal:0.735},{s:'S9',zs:0.632,cal:0.806},{s:'S10',zs:0.691,cal:0.566},
               {s:'S11',zs:0.966,cal:1.000},{s:'S13',zs:0.786,cal:0.731},{s:'S14',zs:0.963,cal:1.000},
               {s:'S15',zs:0.777,cal:0.494},{s:'S16',zs:0.987,cal:0.995},{s:'S17',zs:0.935,cal:0.993}],
-    means:{zs:0.750, cal:0.867}
+    means:{zs:0.750, cal:0.867},
+    // RESULTS.md "heart rate going up beats every model": one LOSO run, all six
+    detectors:[{n:'Heart rate up · on the board',v:0.865,c:'#2DBE9E'},
+               {n:'Autoencoder + heart rate',v:0.852},
+               {n:'Heart rate, both directions',v:0.734},
+               {n:'Autoencoder · on the master',v:0.732,c:'#6F8FDB'},
+               {n:'Autoencoder, 4x larger (16 MB)',v:0.730},
+               {n:'10 features · the old board',v:0.635}]
   };
 
 
@@ -1225,7 +1238,24 @@ class Component extends DCLogic {
     evs.forEach((e,i)=>{ const c=centers[i%centers.length]; const px=padL+c*pw; const py=Y(e.peakNum/100); if(e.peakNum/100>thr){ ctx.beginPath(); ctx.arc(px,py,3.4,0,Math.PI*2); ctx.fillStyle='#F2645A'; ctx.fill(); ctx.strokeStyle='#fff'; ctx.lineWidth=1.5; ctx.stroke(); } });
     ctx.fillStyle='#9AA6B2'; ctx.font='10px Plus Jakarta Sans, sans-serif'; ctx.textAlign='left'; ctx.fillText('09:00',padL+2,h-5); ctx.textAlign='center'; ctx.fillText('12:00',padL+pw*0.5,h-5); ctx.textAlign='right'; ctx.fillText('now',w-padR-2,h-5);
   }
+  drawMethodCmp(){
+    const cv=this.methodCmpRef.current; if(!cv) return; const {ctx,w,h}=this.prep(cv); ctx.clearRect(0,0,w,h);
+    const F='Plus Jakarta Sans, sans-serif', D=this.METHOD.detectors;
+    ctx.font='12px '+F; const lw=Math.max(...D.map(d=>ctx.measureText(d.n).width));
+    const padL=Math.min(lw+14,w*0.48),padR=44,padT=4,padB=24, pw=w-padL-padR, row=(h-padT-padB)/D.length;
+    const X=v=>padL+Math.max(0,Math.min(1,v))*pw;
+    ctx.lineWidth=1; ctx.font='11px '+F; ctx.textAlign='center'; ctx.textBaseline='alphabetic';
+    [0,0.25,0.5,0.75,1].forEach(g=>{ const x=Math.round(X(g))+.5;
+      ctx.strokeStyle=g===0?'#C9D2DE':'#EFF3F8'; ctx.beginPath(); ctx.moveTo(x,padT); ctx.lineTo(x,h-padB); ctx.stroke();
+      ctx.fillStyle='#6B7787'; ctx.fillText(g.toFixed(2),x,h-7); });
+    D.forEach((d,i)=>{ const y=padT+row*i, bh=Math.min(20,row*0.62), by=y+(row-bh)/2;
+      ctx.fillStyle=d.c||'#D7DEE8'; ctx.beginPath(); ctx.roundRect(padL,by,X(d.v)-padL,bh,[0,4,4,0]); ctx.fill();
+      ctx.textBaseline='middle'; ctx.textAlign='right'; ctx.font=(d.c?'600 ':'')+'12px '+F;
+      ctx.fillStyle=d.c?'#1B2430':'#6B7787'; ctx.fillText(d.n,padL-10,by+bh/2);
+      ctx.textAlign='left'; ctx.font='700 12px '+F; ctx.fillStyle='#1B2430'; ctx.fillText(d.v.toFixed(3),X(d.v)+6,by+bh/2); });
+  }
   drawMethod(){
+    this.drawMethodCmp();
     const cv=this.methodRef.current; if(!cv) return; const {ctx,w,h}=this.prep(cv); ctx.clearRect(0,0,w,h);
     const padL=52,padR=8,padT=50,padB=26, pw=w-padL-padR, plot=h-padT-padB;
     const Y=v=>padT+plot-Math.max(0,Math.min(1,v))*plot;
@@ -1452,7 +1482,7 @@ class Component extends DCLogic {
       demoSrcLabel: st.demoSrc==='wesad'?'WESAD S5':'Simulated',
       poorTrack: st.poorInject?'#F4B740':'#D7DEE8', poorKnob: st.poorInject?'23px':'3px',
       // method
-      methodStats:this.METHOD.stats, methodRef:this.methodRef,
+      methodStats:this.METHOD.stats, methodRef:this.methodRef, methodCmpRef:this.methodCmpRef,
       // calibration
       calib:calibVM, calibRef:this.calibRef, personalized:this._personalized,
       methodOpen: st.methodOpen, onCloseMethod:()=>this.setState({methodOpen:false}),

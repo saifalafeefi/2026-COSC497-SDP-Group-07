@@ -81,14 +81,15 @@ the device. the PC is an optional scorer (`anomaly/fleet.py`): it reads that
 stream, runs the autoencoder, and pushes the verdict back to the board's
 `/flag`, which drives both the TFT and every browser watching.
 
-**the board runs its own detector.** the Mahalanobis baseline, the movement gate
-and the live scale are ported to C++ (`pulse_display/board_detector.h`, fitted and
-exported by `anomaly/board_export.py`) and score the stream once a second on the
-board — the full sensor → detect → alert loop with no PC at all, and the raw
-waveform never leaves the device. when the PC is there its autoencoder wins; when
-it goes away the board's own verdict takes over, marked ON-DEVICE. the cost is
-measured, not guessed: **0.635 PR-AUC on the board vs 0.706 for the autoencoder**
-(WESAD LOSO). at boot the board checks its C++ against the Python reference
+**the board runs its own detector.** the movement gate, the heart rate and the
+live scale are ported to C++ (`pulse_display/board_detector.h`, exported by
+`anomaly/board_export.py`) and score the stream once a second on the board — the
+full sensor → detect → alert loop with no PC at all, and the raw waveform never
+leaves the device. the score is heart rate rising above the wearer's own recent
+calm. when the PC is there its autoencoder wins; when it goes away the board's
+own verdict takes over, marked ON-DEVICE. on WESAD LOSO the board's rule scores
+**0.865 PR-AUC, above the autoencoder's 0.706** and the 10-feature Mahalanobis it
+replaced (0.635) — see `anomaly/RESULTS.md`. at boot the board checks its C++ against the Python reference
 (`/health` → `self=pass`); on the rig it takes ~210 ms a second on core 0 and
 leaves the sensor loop untouched.
 
@@ -114,7 +115,7 @@ tick as we go. `[x]` = done.
 - [x] board joins WiFi (credentials in gitignored `secrets.h` or over USB) and serves the dashboard from flash
 - [x] signal conditioning (resample + band-pass) ported to C, verified against the Python to 1.7e-9
 - [x] TFT shows CALM / STRESSED / no-finger instead of a waveform
-- [x] run a model on the board itself (DoD 4 / O7) — Mahalanobis + movement gate in C++, self-tested at boot against the Python reference
+- [x] run a model on the board itself (DoD 4 / O7) — heart rate + movement gate in C++, self-tested at boot against the Python reference
 - [ ] assemble the Pi sensor rig (MAX30102 + accelerometer)
 - [ ] validate: resting HR within ±5 bpm of **a reference oximeter**, 5-min recording, ≥3 people
 - [ ] accelerometer logging working (no accelerometer on the rig yet)

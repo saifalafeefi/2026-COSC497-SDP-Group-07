@@ -505,8 +505,8 @@ def print_session(S: dict, A: dict):
           "responds at >= %.2f)" % (_fmt(A["auc"]), A["score_kind"], AUC_RESPONDS))
     print("  recall@90spec      %s of induction windows above the baseline's p90" % _fmt(A["recall90"]))
     if not math.isnan(A["ond_auc"]):
-        print("  on-device model    AUROC %s, recall@90spec %s (the board's own detector; "
-              "the gap to the host is the on-device cost)" % (_fmt(A["ond_auc"]), _fmt(A["ond_recall90"])))
+        print("  on-device model    AUROC %s, recall@90spec %s (the board's own heart-rate "
+              "detector, beside the host's)" % (_fmt(A["ond_auc"]), _fmt(A["ond_recall90"])))
     print("  still elevated     %s of recovery windows above that line" % _fmt(A["recovery_above"]))
     print("  first live flag    %s" % (_fmt(A["ttf"], "%.0f s after induction began")
                                      if not math.isnan(A["ttf"]) else "never, during or after induction"))

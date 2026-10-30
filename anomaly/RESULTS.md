@@ -120,6 +120,45 @@ of each subject's calm calibrates; the rest + all their stress is the test set):
 
 regenerate: `./run anomaly.calibrate`
 
+## heart rate going up beats every model (2026-10-30)
+
+scoring each window by its **pulse rate alone**, and counting only a *rise*, beats
+every detector above. same LOSO split, same 15 subjects:
+
+| detector | PR-AUC | recall@90% spec | ROC-AUC | K=8 episodes / FA per h |
+|---|---|---|---|---|
+| **heart rate, up only (on the board)** | **0.865 ± 0.154** | **0.813 ± 0.226** | **0.898** | 15/15 · 4.3 |
+| heart rate, both directions | 0.734 ± 0.241 | 0.604 ± 0.325 | 0.769 | 14/15 · 5.2 |
+| autoencoder, deployed (retrained on CPU) | 0.732 ± 0.190 | 0.577 | 0.797 | 15/15 · 0.6 |
+| autoencoder, bottleneck 256 uncapped (16 MB) | 0.730 ± 0.191 | 0.565 | 0.810 | 15/15 · 1.1 |
+| autoencoder + heart rate up (equal weights) | 0.852 ± 0.156 | 0.767 | 0.888 | 15/15 · 1.3 |
+| 10-feature Mahalanobis (the board's, until now) | 0.635 ± 0.249 | 0.437 ± 0.326 | 0.723 | 10/15 · 2.2 |
+
+- **direction is the whole difference** (0.734 → 0.865). the Mahalanobis distance,
+  and HR scored both ways, flag a *falling* rate as readily as a rising one; stress
+  only pushes it up. the direction comes from the physiology stated in the scope
+  (HR ↑ under stress), not from tuning.
+- **HRV moves the wrong way here.** sdnn/rmssd *rise* under TSST on wrist BVP (ROC
+  0.24–0.25 scored "down"), likely peak jitter while talking. it is why adding them
+  hurts, and why the 10-feature detector was the weakest.
+- **a bigger autoencoder buys nothing**: the 16 MB uncapped model ties the 4 MB
+  deployed one (0.730 vs 0.732). the deployed AE retrains to 0.732 here vs 0.706
+  in the table above — run-to-run noise of ~0.03.
+- **combining AE + HR** beats the AE alone in 15/15 subjects and cuts sustained false
+  alarms vs HR alone (1.3 vs 4.3 /h at K=8), but does not beat HR on ranking.
+- **through the live scale** (3-min memory, calm → stress replayed in 5 s ticks, flag
+  at 3σ): HR flags 7.8% of calm and catches 15/15 onsets; the old board detector
+  8.9% and 14/15; the AE 6.5% and 15/15. HR keeps more of the stress flagged
+  (19.5% vs 10.3% / 14.1%). all three lose most of the stress after a few minutes:
+  the 3-min reference absorbs it. a 10-min reference roughly doubles HR's flagged
+  stress time (34%) with calm unchanged (7.0%).
+- **caveats.** TSST is a *spoken* task, so part of the HR rise may be speech, and any
+  exertion (walking, stairs) will raise it too — there is no accelerometer on the rig
+  to tell them apart. all of this is WESAD; none of it is shown on our sensor yet.
+
+the board now scores heart rate (`pulse_display/board_detector.h`). reproduce:
+`./run anomaly.run --model hr`.
+
 ## edge compression (O7)
 
 the deployed model (**bottleneck-256 · ch-cap 32**) converts to TFLite for the device.
@@ -164,6 +203,7 @@ artifacts: `anomaly/saved/ae_int8.tflite` (+ `ae_float32.tflite`). regenerate:
 
 ```bash
 ./run anomaly.run --model baseline  # ~0.64 PR-AUC
+./run anomaly.run --model hr        # ~0.87 (heart rate up; the board's)
 ./run anomaly.run --model ae        # ~0.67 (O1)
 ./run anomaly.run --model ssl       # ~0.68 (O2)
 ./run anomaly.make_plots            # regenerate the figures above

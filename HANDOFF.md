@@ -245,7 +245,8 @@ continuous 50 Hz IR/RED at ~2 min each, re-windowable to 60 s.
 a 10x10 inverse covariance) against the autoencoder's 4.2 MB — no TFLM, no
 arena sizing, no partition changes. The 0.71 -> 0.64 PR-AUC gap IS the "accuracy
 cost" the DoD asks to be reported, and it gives the board a verdict when the
-master is away.
+master is away. *(done 2026-09-30; on 2026-10-30 its score was replaced by heart
+rate going up, 0.865 PR-AUC on WESAD LOSO — see `anomaly/RESULTS.md`.)*
 
 **4. Bottleneck sweep.** One command on the GPU box; 91% of the model is two
 Dense layers, so a smaller bottleneck may cut it 4x for little accuracy loss:

@@ -104,7 +104,7 @@ is back to the system python, which is the usual reason it "stops working".
 | `anomaly.device_source` | current | sensor self-test, no model and no dashboard in the way |
 | `anomaly.device_calibrate` | current, USB only | re-derive thresholds on your own calm, for `serve --source device` |
 | `anomaly.protocol` | **the experiment** | record an induced-stress session on the fleet, then score it |
-| `anomaly.board_export` | build step | fit + export the on-device detector to the firmware |
+| `anomaly.board_export` | build step | export the on-device detector to the firmware |
 | `anomaly.run` | build step | leave-one-subject-out evaluation (O1/O2) |
 | `anomaly.export` + `anomaly.compress` | build step | train and ship a new model. always both, in that order |
 | `anomaly.make_demo_clip` | build step | rebake the WESAD demo clip into Pulse Watch |
@@ -471,15 +471,17 @@ the rest of `data\`.
 ### 2.6 the on-device detector
 
 the board scores itself once a second: the same movement gate the master uses,
-10 pulse features, Mahalanobis distance from WESAD calm, and the master's live
-self-referencing scale. the master's verdict still wins while it is fresh (it
+the heart rate as the score, and the master's live self-referencing scale, which
+only flags it going UP from the wearer's own recent calm. nothing is fitted. the master's verdict still wins while it is fresh (it
 runs the autoencoder); when the master is gone the board's own takes over and
 the panel says **ON-DEVICE**. the raw waveform never has to leave the board.
 
-the cost, on WESAD leave-one-subject-out: PR-AUC **0.635** / recall@90spec
-**0.437** on the board, against the autoencoder's 0.706 / 0.545 on the host.
-the board's verdict rides along in every frame (`ond`), so a protocol session
-(§2.5) reports both side by side — the same gap, measured on our hardware.
+on WESAD leave-one-subject-out the board's rule scores PR-AUC **0.865** /
+recall@90spec **0.813**, against the autoencoder's 0.706 / 0.545 on the host and
+the 10-feature Mahalanobis it replaced (0.635 / 0.437). reproduce with
+`python -m anomaly.run --model hr`. the board's verdict rides along in every
+frame (`ond`), so a protocol session (§2.5) reports both side by side, on our
+hardware.
 
 at boot it runs baked test windows through the C++ and compares them to the
 Python reference. serial prints `# on-device detector self-test pass …`, and
@@ -488,21 +490,21 @@ Python reference. serial prints `# on-device detector self-test pass …`, and
 | field | meaning |
 |---|---|
 | `self` | `pass`, `fail` (detail on serial; it will not issue verdicts), or `off` (no PSRAM) |
-| `det` | `idle` no finger · `warm` filling · `hold` movement · `ok` scoring |
-| `dsc` / `dlv` | raw score / level 0–100 (`-1` = none yet) |
+| `det` | `idle` no finger · `warm` filling · `hold` movement or no readable pulse · `ok` scoring |
+| `dsc` / `dlv` | score (heart rate, bpm) / level 0–100 (`-1` = none yet) |
 | `dms` | milliseconds the last tick took, on core 0 |
 | `dhold` | windows refused for movement |
 | `ddrop` | seconds the gate skipped in the last scored window. climbing 1/s = every new second rejected, window back-filled from older ones — why `dsc` can sit frozen |
 
-refit or change it — both files in `pulse_display\` come from here (and
+change it — both files in `pulse_display\` come from here (and
 `board_model.h` is mirrored into `pulse_headless\` for you):
 
 ```powershell
 python -m anomaly.board_export --check 300   # prove the C algorithm vs scipy/quality
-python -m anomaly.board_export               # refit on WESAD calm -> board_model.h
+python -m anomaly.board_export               # rewrite board_model.h
 ```
 
-`board_model.h` is generated (the fit, the constants, the self-test vectors) and
+`board_model.h` is generated (the constants and the self-test vectors) and
 committed so a fresh clone compiles. `board_detector.h` is the algorithm, a
 line-for-line port of the mirror in `board_export.py`: change one, change the
 other, re-run `--check`, reflash, and read `self=`.

@@ -610,12 +610,12 @@ class App:
             when=lambda: self.ready() and not self.is_running("assets"))
         self._btn(row, "Open sketch folder", lambda: self.open_path("pulse_display"))
 
-        row = self._section(f, "On-device detector", "Prove the C port's algorithm, or refit it on WESAD "
+        row = self._section(f, "On-device detector", "Prove the C port's algorithm, or re-export it "
                                                      "(rewrites pulse_display/board_model.h; re-upload after).")
         self._btn(row, "Check C port", lambda: self.run(
             "export", "Check the on-device detector", ["-m", "anomaly.board_export", "--check", "300"]),
             when=lambda: self.ready() and not self.is_running("export"))
-        self._btn(row, "Refit + export", self.refit_board,
+        self._btn(row, "Export", self.refit_board,
                   when=lambda: self.ready() and not self.is_running("export"))
 
         row = self._section(f, "Data store", "Subjects, baselines, sessions and flags (data/pulse.db).")
@@ -918,9 +918,9 @@ class App:
             self.run("wifi", "Forget board WiFi", ["-m", "anomaly.device_wifi", "--forget"], serial=True)
 
     def refit_board(self):
-        if messagebox.askyesno(APP, "Refit the on-device detector on WESAD and rewrite "
+        if messagebox.askyesno(APP, "Re-export the on-device detector and rewrite "
                                     "pulse_display/board_model.h?\n\nYou will need to re-upload the sketch."):
-            self.run("export", "Refit + export on-device detector", ["-m", "anomaly.board_export"])
+            self.run("export", "Export on-device detector", ["-m", "anomaly.board_export"])
 
     def backup_db(self):
         path = filedialog.asksaveasfilename(title="Back up the store", defaultextension=".db",
