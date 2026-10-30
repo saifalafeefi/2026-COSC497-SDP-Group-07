@@ -363,6 +363,8 @@ def load_session(db: Db, sid: int) -> dict:
         if "ond_score" in z.files:             # sessions from before the board scored
             out["ond_score"] = z["ond_score"]
         out["n_raw"] = int(z["raw_bvp"].size)
+        for k in ("raw_t", "raw_bvp", "raw_contact"):
+            out[k] = z[k]
         out["source"] = "file"
     else:
         # no session file (an aborted master, or it was lost): the store still
@@ -389,6 +391,53 @@ def auroc(neg, pos) -> float:
     r = rankdata(np.concatenate([neg, pos]))
     rp = r[len(neg):].sum()
     return float((rp - len(pos) * (len(pos) + 1) / 2.0) / (len(pos) * len(neg)))
+
+
+RESCORE_STEP = 5.0        # seconds between re-scored windows, as in the WESAD harness
+
+
+def rescore(S: dict, step: float = RESCORE_STEP) -> dict:
+    """re-score the session's own saved waveform with the detectors the master
+    does not run, so one session compares them all on our sensor:
+
+        heart rate up       the board's rule, from the window's pulse peaks
+        HR + pulse motion   anomaly.context's model: HR above what the pulse
+                            signal's own motion implies (saved/context_pulse.npz)
+
+    windows are built as the master builds them -- contact samples only, the
+    last 150 s through the movement gate -- every `step` seconds. returns
+    name -> array aligned to S["t"], NaN where no window was scored."""
+    if not S.get("n_raw"):
+        return {}
+    from . import quality
+    from .context import SAVED, ContextScorer
+    from .features import extract_features
+    ctx = ContextScorer() if os.path.exists(SAVED) else None
+    keep = S["raw_contact"] == 1
+    rt = S["raw_t"][keep]
+    rb = S["raw_bvp"][keep].astype(np.float32)
+    t = S["t"]
+    out = {"heart rate up": np.full(len(t), np.nan)}
+    if ctx is not None:
+        out["HR + pulse motion"] = np.full(len(t), np.nan)
+    last = -math.inf
+    for j, tj in enumerate(t):
+        if tj - last < step:
+            continue
+        n = int(np.searchsorted(rt, tj, side="right"))
+        if n < WIN:
+            continue
+        r = quality.clean_window(rb[max(0, n - 150 * FS):n], WIN, FS)
+        if r["window"] is None:
+            continue
+        last = tj
+        if ctx is not None:
+            hr, c = ctx.score_window(r["window"])
+            out["HR + pulse motion"][j] = c
+        else:
+            hr = float(extract_features(r["window"], FS)[0])
+        out["heart rate up"][j] = hr
+    return out
 
 
 def analyse(S: dict) -> dict:
@@ -424,6 +473,7 @@ def analyse(S: dict) -> dict:
             "score": float(np.median(sc)) if sc.size else math.nan,
             "level": float(np.nanmean(lv)) if np.isfinite(lv).any() else math.nan,
             "flagged": float(fl.mean()) if fl.size else math.nan,
+            "pure": pure,
         }
     A = {"phases": phases, "score_kind": "raw" if score is S["raw"] else "smoothed"}
     b, i, r = (phases.get(p) for p in PHASES)
@@ -443,6 +493,16 @@ def analyse(S: dict) -> dict:
         A["ond_auc"] = auroc(b["ond_scores"], i["ond_scores"])
         othr = float(np.quantile(b["ond_scores"], 0.90))
         A["ond_recall90"] = float(np.mean(i["ond_scores"] > othr))
+    # every re-scored detector, by the same rule on the same pure windows
+    A["detectors"] = {}
+    need = max(6, int(MIN_WINDOWS / RESCORE_STEP))
+    for name, v in (S.get("rescored") or {}).items():
+        if not (b and i):
+            break
+        bs, ins = v[b["pure"] & np.isfinite(v)], v[i["pure"] & np.isfinite(v)]
+        if bs.size >= need and ins.size >= need:
+            A["detectors"][name] = (auroc(bs, ins), float(np.mean(ins > np.quantile(bs, 0.90))),
+                                    int(bs.size), int(ins.size))
     if i:
         hit = np.nonzero((t >= i["t0"]) & (S["flag"] == 1))[0]
         A["ttf"] = float(t[hit[0]] - i["t0"]) if hit.size else math.nan
@@ -507,6 +567,9 @@ def print_session(S: dict, A: dict):
     if not math.isnan(A["ond_auc"]):
         print("  on-device model    AUROC %s, recall@90spec %s (the board's own heart-rate "
               "detector, beside the host's)" % (_fmt(A["ond_auc"]), _fmt(A["ond_recall90"])))
+    for name, (auc, rec, nb, ni) in A.get("detectors", {}).items():
+        print("  re-scored          %-18s AUROC %s, recall@90spec %s (%d baseline / %d induction "
+              "windows)" % (name, _fmt(auc), _fmt(rec), nb, ni))
     print("  still elevated     %s of recovery windows above that line" % _fmt(A["recovery_above"]))
     print("  first live flag    %s" % (_fmt(A["ttf"], "%.0f s after induction began")
                                      if not math.isnan(A["ttf"]) else "never, during or after induction"))
@@ -710,6 +773,7 @@ def cmd_report(a) -> int:
         except ValueError as e:
             print("  %s" % e)
             continue
+        S["rescored"] = rescore(S)
         A = analyse(S)
         print_session(S, A)
         if a.plot:

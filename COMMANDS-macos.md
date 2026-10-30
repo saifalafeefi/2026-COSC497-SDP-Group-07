@@ -126,6 +126,8 @@ two things make that appear to "stop working":
 | `anomaly.export` + `anomaly.compress` | build step | train and ship a new model. always both, in that order |
 | `anomaly.make_demo_clip` | build step | rebake the WESAD demo clip into Pulse Watch |
 | `anomaly.calibrate` | build step | per-user calibration on WESAD (the O6 *method*) |
+| `anomaly.context` | experiment | heart rate vs heart rate in the context of motion, on WESAD |
+| `anomaly.dalia` | experiment | false alarms in daily life on PPG-DaLiA (`--live`, `--mixed`); needs `PPG_DaLiA/` |
 | `anomaly.make_plots` | build step | regenerate the result figures |
 | `anomaly.master` | **superseded** | one board, headless, no roster and no store. `fleet` does this and more |
 | `pipeline/server.py` | **prior work** | the old cardiac dashboard. do not point a demo at it |
@@ -516,6 +518,13 @@ responds), **recall@90spec** against the session's own baseline p90, and time
 to first live flag. only windows lying entirely inside a phase count. verdicts:
 `RESPONDS`, `HR ONLY` (the domain-transfer finding — report it),
 `NO INDUCTION`, `UNSCOREABLE`.
+
+the report also re-scores each session's saved waveform with the detectors the
+master does not run — `heart rate up` (the board's rule) and `HR + pulse
+motion` (`anomaly.context`, from `saved/context_pulse.npz`) — every 5 s, by the
+same AUROC / recall@90spec rule, so one session compares them all on our
+sensor. the heart-rate rule passing is close to the HR control check passing;
+the comparison that matters is whether the two models follow it.
 
 files land in `data/protocols/session_<id>.npz` (+ `.png`), gitignored with
 the rest of `data/`.

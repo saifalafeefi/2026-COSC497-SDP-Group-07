@@ -38,6 +38,7 @@ tensorboard/
 .ipynb_checkpoints/
 /docs
 /WESAD
+/PPG_DaLiA
 
 # large local model artifacts — dashboard + device run ae_int8.tflite (4 MB, tracked)
 anomaly/saved/ae.keras

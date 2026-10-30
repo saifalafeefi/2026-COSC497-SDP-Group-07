@@ -618,6 +618,15 @@ class App:
         self._btn(row, "Export", self.refit_board,
                   when=lambda: self.ready() and not self.is_running("export"))
 
+        row = self._section(f, "Experiments", "No hardware: heart rate alone vs heart rate "
+                                              "in the context of motion, on WESAD and PPG-DaLiA (needs both folders).")
+        self._btn(row, "HR vs HR + motion", lambda: self.run(
+            "context", "HR vs HR + motion (WESAD)", ["-m", "anomaly.context"]),
+            when=lambda: self.ready() and not self.is_running("context"))
+        self._btn(row, "Daily-life false alarms", lambda: self.run(
+            "dalia", "Daily-life false alarms (PPG-DaLiA)", ["-m", "anomaly.dalia", "--live"]),
+            when=lambda: self.ready() and not self.is_running("dalia"))
+
         row = self._section(f, "Data store", "Subjects, baselines, sessions and flags (data/pulse.db).")
         self._btn(row, "Summary", lambda: self.run("db", "Store summary", ["-m", "anomaly.db"]),
                   when=lambda: self.ready() and not self.is_running("db"))

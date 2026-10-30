@@ -159,6 +159,120 @@ every detector above. same LOSO split, same 15 subjects:
 the board now scores heart rate (`pulse_display/board_detector.h`). reproduce:
 `./run anomaly.run --model hr`.
 
+## heart rate in the context of motion (2026-10-30)
+
+heart rate alone cannot tell stress from effort. the scope's cross-signal anomaly
+is "HR higher than this much movement explains". `anomaly/context.py` scores it
+from the 10 pulse features and 7 wrist-accelerometer features per window, LOSO,
+fitted on calm, and like the rule it counts only HR *above* expectation:
+
+| model | PR-AUC | recall@90% spec | ROC-AUC | K=8 episodes | FA/h | flagged, busiest calm quarter |
+|---|---|---|---|---|---|---|
+| heart rate up (the board's rule) | **0.865 ± 0.154** | **0.813** | **0.898** | 15/15 | 4.3 | **25%** |
+| HR minus linear fit on motion | 0.769 ± 0.199 | 0.636 | 0.772 | 15/15 | 2.6 | 7% |
+| **masked autoencoder, HR given motion** | 0.817 ± 0.172 | 0.673 | 0.865 | 15/15 | 2.8 | **9%** |
+| same autoencoder, plain reconstruction error | 0.758 ± 0.186 | 0.593 | 0.823 | 14/15 | 2.4 | 18% |
+
+- **what the context buys:** at the 90%-specificity line, the rule flags **25%** of
+  the most active quarter of calm (2.5× its 10% average); the context autoencoder
+  flags **9%**, i.e. movement no longer drives its false alarms. sustained false
+  alarms drop 4.3 → 2.8 /h.
+- **what it costs here:** stress ranking 0.865 → 0.82 (0.809–0.831 over three
+  seeds). WESAD's stress task is spoken and partly standing: wrist motion is a median
+  **2.25× higher** in stress than calm (above 1.2× in 11/15). part of the stress HR
+  rise really is movement, and the context model discounts it. it also means the
+  rule's 0.865 is helped by that movement.
+- **the learned model earns its place over its statistical twin:** 0.82 vs 0.77 for
+  the linear fit, and well above the waveform autoencoder (0.73). it is also tiny
+  (17 inputs, a few hundred weights), so it fits on the board.
+- **the textbook autoencoder score is the wrong one:** reconstruction error is
+  two-sided and gives 0.758. the masked, one-sided "HR above what motion implies"
+  is what works.
+- **what WESAD cannot show:** whether it beats the rule when normal includes
+  activity (walking, stairs, work). that needs PPG-DaLiA or our own step-test data.
+
+reproduce: `./run anomaly.context` (features from the `anomaly.channels` cache).
+
+### without an accelerometer: motion read off the pulse
+
+our rig has no accelerometer, so the same model was given motion as the pulse
+signal itself shows it (`--motion pulse`): how uneven the per-second amplitude is
+(the movement gate's envelope), how much the spike test marks, and how rough and
+broadband the waveform is. within each person's calm, the envelope measures track
+the wrist accelerometer at Spearman ~0.6 and heart rate at ≤0.34, so they are motion,
+not heart rate in disguise.
+
+| model | PR-AUC | recall@90% spec | FA/h | flagged, busiest calm quarter |
+|---|---|---|---|---|
+| heart rate up | **0.865** | **0.813** | 4.3 | 25% |
+| context AE, accelerometer | 0.817 | 0.673 | 2.8 | 9% |
+| **context AE, pulse-derived motion** | 0.778 | 0.621 | 2.6 | **12%** |
+| context AE, both | 0.808 | 0.662 | 1.5 | 9% |
+| waveform AE (the master's today) | 0.732 | 0.577 | 0.6 | 17% |
+
+- pulse-derived motion keeps most of what the accelerometer buys: busiest-calm
+  false alarms 25% → 12% (9% with the accelerometer), on hardware we already have.
+- it beats the master's waveform autoencoder on ranking and on movement, but not on
+  sustained false alarms (2.6 vs 0.6 /h), and through the live scale it trades
+  stress caught for calm flagged depending on the setting. not a clear enough win to
+  swap the master's model on WESAD alone.
+- the deciding evidence is our own session: `protocol report` now re-scores every
+  session's saved waveform with the heart-rate rule and this model
+  (`saved/context_pulse.npz`, 4.7 KB, numpy, fitted on all 15 subjects' calm), beside
+  the master's live score.
+- caution, seen on synthetic sessions cut from WESAD: when a person moves during the
+  task (S5), the context model explains the HR rise away (AUROC 0.52 vs HR's 0.98).
+  the protocol's "keep the sensor hand still" matters for it.
+
+reproduce: `./run anomaly.context --motion pulse`; export with `--export`.
+
+## daily life: false alarms on PPG-DaLiA (2026-10-31)
+
+PPG-DaLiA (UCI 495, CC BY 4.0) is 15 people wearing the same E4 wrist band for
+~2.5 h of ordinary activity — sitting, stairs, table soccer, cycling, driving,
+lunch, walking, desk work — and no stress protocol, so **every flag is false**.
+`anomaly/dalia.py` (pickles read with a restricted unpickler), 60 s windows every 5 s.
+
+**a fixed calm line fails for every detector.** thresholded at each person's own
+first-sitting p90, all detectors flag 47–100% of every later activity — driving and
+lunch included. heart rate simply stays above the morning sitting level for the rest
+of the day: the same drift that made a calibration-time threshold fail on WESAD.
+
+**the live flag rule (own last 3 min as the reference) is what keeps it usable.**
+false alarms per hour over each whole recording:
+
+| detector | line at 3σ (slider default) | line at 5σ |
+|---|---|---|
+| heart rate up (board) | 10.2 | 3.2 |
+| waveform autoencoder (master) | 9.6 | 2.2 |
+| **HR + accelerometer, fitted on WESAD calm** | **6.5** | **1.7** |
+| HR + accelerometer, fitted with daily life as normal | 9.2 | 2.4 |
+| HR + pulse-derived motion, fitted with daily life as normal | 9.5 | 1.9 |
+
+the second, held-out direction — WESAD stress with the context models fitted on all of
+DaLiA plus the other subjects' calm: HR **0.865**, HR + accelerometer 0.801 (busiest
+calm flagged 7%), HR + pulse motion 0.697.
+
+- **the threshold matters more than the model.** moving the line from 3σ to 5σ cuts
+  false alarms ~3–4× for every detector; the best model cuts them ~1.6× at a fixed line.
+  but 5σ also catches less stress (WESAD replay: HR 12/15 onsets vs 15/15 at 3σ).
+  for working wearers, the default 3σ line means ~10 false alarms an hour for anyone.
+- **an accelerometer is worth having:** HR + accelerometer has the fewest false alarms
+  at both lines (−36% / −47% vs HR) and keeps stress ranking ~0.80.
+- **training on daily life did not help** — it made the context models accept high HR
+  with movement, which also costs them stress (pulse motion 0.778 → 0.697). the live
+  scale already absorbs sustained activity; the false alarms left are at transitions.
+- **pulse-derived motion is not a substitute in daily life:** fewest false alarms at 5σ
+  (1.9/h), but its stress ranking falls when it learns from activity, where pulse
+  artifacts and real motion are tangled.
+
+what this says to do: keep heart rate on the board; report the operating point (line
+vs false alarms vs stress caught) instead of one number; and treat the accelerometer
+as the improvement worth the hardware, not a bigger model.
+
+reproduce: `./run anomaly.dalia --live` and `./run anomaly.dalia --mixed`
+(data in `PPG_DaLiA/`, gitignored; features cached on first run).
+
 ## edge compression (O7)
 
 the deployed model (**bottleneck-256 · ch-cap 32**) converts to TFLite for the device.
