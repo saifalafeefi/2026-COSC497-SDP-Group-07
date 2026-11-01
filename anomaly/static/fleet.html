@@ -32,7 +32,7 @@
   .why{color:var(--dim);font-size:12px;min-height:17px}
   .bar{height:7px;background:#0d1218;border-radius:4px;margin:11px 0 3px;overflow:hidden}
   .bar>div{height:100%;background:var(--accent);width:0;transition:width .25s}
-  .vitals{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin:13px 0 4px}
+  .vitals{display:grid;grid-template-columns:repeat(4,1fr);gap:9px;margin:13px 0 4px}
   .v{background:#131a22;border-radius:7px;padding:8px 10px}
   .v b{display:block;font-size:17px;font-weight:650}
   .v span{color:var(--dim);font-size:11px}
@@ -212,6 +212,7 @@ function buildCard(id){
       <div class="v"><b class="js-bpm">—</b><span>bpm</span></div>
       <div class="v"><b class="js-spo2">—</b><span>SpO₂ %</span></div>
       <div class="v"><b class="js-contact">—</b><span>finger</span></div>
+      <div class="v"><b class="js-motion">—</b><span>motion</span></div>
     </div>
     <div class="js-actions"></div>
     <div class="hist">
@@ -223,7 +224,7 @@ function buildCard(id){
   const q = c => root.querySelector('.js-' + c);
   const c = {root, name:q('name'), ip:q('ip'), dot:root.querySelector('.dot'),
              sel:q('sel'), base:q('base'), verdict:q('verdict'), why:q('why'),
-             fill:q('fill'), bpm:q('bpm'), spo2:q('spo2'), contact:q('contact'),
+             fill:q('fill'), bpm:q('bpm'), spo2:q('spo2'), contact:q('contact'), motion:q('motion'),
              actions:q('actions'), hist:q('hist'), histTitle:q('histtitle'),
              clear:q('clear'),
              qual:q('qual'), ond:q('ond'), stale:q('stale'),
@@ -310,6 +311,8 @@ function updateCard(d){
   setText(c.bpm, d.bpm == null ? '—' : String(d.bpm));
   setText(c.spo2, d.spo2 == null ? '—' : String(d.spo2));
   setText(c.contact, d.contact ? 'yes' : fc ? fc.n + '/' + fc.of + ' s' : 'no');
+  // the board's accelerometer, 0..1; same 0.12 line as Pulse Watch. — = none
+  setText(c.motion, d.motion == null ? '—' : d.motion >= 0.12 ? 'moving' : 'still');
 
   // the subject dropdown: options only when the roster changed, value only when
   // it disagrees and the user is not in the middle of using it

@@ -109,7 +109,8 @@ is back to the system python, which is the usual reason it "stops working".
 | `anomaly.export` + `anomaly.compress` | build step | train and ship a new model. always both, in that order |
 | `anomaly.make_demo_clip` | build step | rebake the WESAD demo clip into Pulse Watch |
 | `anomaly.calibrate` | build step | per-user calibration on WESAD (the O6 *method*) |
-| `anomaly.context` | experiment | heart rate vs heart rate in the context of motion, on WESAD |
+| `anomaly.context` | experiment | heart rate vs heart rate in the context of motion, on WESAD; `--export --motion acc` rebuilds the master's `saved/context_acc.npz` |
+| `anomaly.ensemble` | check | re-measures the master's autoencoder + heart rate weights |
 | `anomaly.dalia` | experiment | false alarms in daily life on PPG-DaLiA (`--live`, `--mixed`); needs `PPG_DaLiA/` |
 | `anomaly.make_plots` | build step | regenerate the result figures |
 | `anomaly.master` | **superseded** | one board, headless, no roster and no store. `fleet` does this and more |
@@ -347,6 +348,9 @@ http://<board-ip>/health    plain text diagnostics -- try this FIRST
 - `skip` = frames dropped for websocket backpressure (a weak link)
 - `rec` = times the sensor was re-initialised after stalling
 - `det dsc dlv dms dhold ddrop self psram` = the on-device detector (§2.6)
+- `imu accn mot imur imuhz` = the Rev F accelerometer: on / quiet / off, samples
+  so far, motion 0..1 (still < 0.12), re-kicks, and the rate the chip actually
+  sends (~65 Hz, averaged down to 32)
 
 the wearer's name shows top-right on the board's screen, and survives a reboot.
 
@@ -480,13 +484,18 @@ the rest of `data\`.
 
 the board scores itself once a second: the same movement gate the master uses,
 the heart rate as the score, and the master's live self-referencing scale, which
-only flags it going UP from the wearer's own recent calm. nothing is fitted. the master's verdict still wins while it is fresh (it
-runs the autoencoder); when the master is gone the board's own takes over and
+only flags it going UP from the wearer's own recent calm. with the Rev F's
+accelerometer the score is half the heart rate plus the heart rate above what
+the last minute's movement explains (a ~500-number model baked into
+`board_model.h` from `saved/context_acc.npz`); `/health` says `dmode=motion`,
+else `dmode=hr`. the master's verdict still wins while it is fresh (it
+runs the autoencoder plus heart rate, `anomaly.ensemble`); when the master is gone the board's own takes over and
 the panel says **ON-DEVICE**. the raw waveform never has to leave the board.
 
 on WESAD leave-one-subject-out the board's rule scores PR-AUC **0.865** /
 recall@90spec **0.813**, against the autoencoder's 0.706 / 0.545 on the host and
-the 10-feature Mahalanobis it replaced (0.635 / 0.437). reproduce with
+the 10-feature Mahalanobis it replaced (0.635 / 0.437); with motion 0.854, with
+half the false flags in the busiest calm (RESULTS.md). reproduce with
 `python -m anomaly.run --model hr`. the board's verdict rides along in every
 frame (`ond`), so a protocol session (§2.5) reports both side by side, on our
 hardware.

@@ -143,6 +143,9 @@ class ProtocolRun:
         self.marks: list = []
         self.rows: list = []
         self.raw_t, self.raw_idx, self.raw_bvp, self.raw_contact = [], [], [], []
+        # the board's accelerometer, when it has one: [x, y, z] in 1/64 g at
+        # 32 Hz, each stamped with the clock of the frame it came in
+        self.raw_acc_t, self.raw_acc = [], []
         self.finished = False
         self.aborted = False
         self.reason = ""
@@ -231,11 +234,17 @@ class ProtocolRun:
 
     # ---- data in ----
 
-    def feed(self, idx, bvp, contact: bool):
-        """one websocket frame of conditioned 64 Hz samples."""
-        if self.finished or not self.record_raw or not bvp:
+    def feed(self, idx, bvp, contact: bool, acc=None):
+        """one websocket frame of conditioned 64 Hz samples (+ accelerometer)."""
+        if self.finished or not self.record_raw:
             return
         t = self.clock()
+        for a in acc or []:
+            if len(a) == 3:
+                self.raw_acc_t.append(t)
+                self.raw_acc.append(a)
+        if not bvp:
+            return
         idx = idx or []
         for k, v in enumerate(bvp):
             self.raw_t.append(t)
@@ -319,7 +328,9 @@ class ProtocolRun:
             raw_t=np.asarray(self.raw_t, np.float64),
             raw_idx=np.asarray(self.raw_idx, np.int64),
             raw_bvp=np.asarray(self.raw_bvp, np.float32),
-            raw_contact=np.asarray(self.raw_contact, np.int8))
+            raw_contact=np.asarray(self.raw_contact, np.int8),
+            raw_acc_t=np.asarray(self.raw_acc_t, np.float64),
+            raw_acc=np.asarray(self.raw_acc, np.int16).reshape(-1, 3))
         return path
 
     def status(self) -> dict:
@@ -365,6 +376,9 @@ def load_session(db: Db, sid: int) -> dict:
         out["n_raw"] = int(z["raw_bvp"].size)
         for k in ("raw_t", "raw_bvp", "raw_contact"):
             out[k] = z[k]
+        for k in ("raw_acc_t", "raw_acc"):     # sessions from boards with an IMU
+            if k in z.files:
+                out[k] = z[k]
         out["source"] = "file"
     else:
         # no session file (an aborted master, or it was lost): the store still

@@ -118,7 +118,8 @@ tick as we go. `[x]` = done.
 - [x] run a model on the board itself (DoD 4 / O7) — heart rate + movement gate in C++, self-tested at boot against the Python reference
 - [ ] assemble the Pi sensor rig (MAX30102 + accelerometer)
 - [ ] validate: resting HR within ±5 bpm of **a reference oximeter**, 5-min recording, ≥3 people
-- [ ] accelerometer logging working (no accelerometer on the rig yet)
+- [x] accelerometer logging — the Rev F board's BNO086 streams 32 Hz to the master and into protocol sessions
+- [x] score it: the master scores IMU boards as 1/4 autoencoder + HR above motion (`anomaly/ensemble.py`)
 - [ ] (O7, with S2) run the compressed model on the Pi — full sensor→detect→alert loop
 
 **S2 · Saif — ML method (O1, O2)**

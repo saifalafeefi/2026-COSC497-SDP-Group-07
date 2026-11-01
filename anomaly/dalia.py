@@ -15,7 +15,9 @@ is how much of each activity it then flags.
     hr        heart rate up, the board's rule
     ctx-acc   anomaly.context's model, accelerometer as context
     ctx-pulse the same, motion read off the pulse (runs on our rig)
-    wave      the master's int8 waveform autoencoder
+    wave      the int8 waveform autoencoder alone
+    ae+hr     the master on a board without an accelerometer (anomaly.ensemble)
+    ae+ctx    the master on a board with one: 1/4 autoencoder + HR above motion
 
 the release ships Python-2 pickles. a pickle can run code, so they are read
 with an unpickler that only rebuilds numpy arrays and plain containers.
@@ -173,6 +175,15 @@ def fit_detectors(names) -> dict:
         out["ctx-pulse"] = lambda r: sc.score(hr_of(r), r["pulse_motion"])
     if "wave" in names:
         out["wave"] = lambda r: r["wave"]
+    if "ae+hr" in names:
+        from .ensemble import combine
+        out["ae+hr"] = lambda r: combine(r["wave"], r["bvp_f"][:, 0])
+    if "ae+ctx" in names:
+        from .context import SAVED_ACC
+        from .ensemble import combine_ctx
+        cs = ContextScorer(SAVED_ACC)       # the master's exported model, as deployed
+        out["ae+ctx"] = lambda r: combine_ctx(r["wave"],
+                                              cs.score(hr_of(r), r["acc_f"].astype(np.float64)))
     return out
 
 
@@ -282,7 +293,8 @@ def mixed(data, thin: int = 3):
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--models", nargs="+", default=["hr", "ctx-acc", "ctx-pulse", "wave"])
+    ap.add_argument("--models", nargs="+",
+                    default=["hr", "ctx-acc", "ctx-pulse", "wave", "ae+hr", "ae+ctx"])
     ap.add_argument("--live", action="store_true", help="also replay through the live flag rule")
     ap.add_argument("--mixed", action="store_true",
                     help="refit the context models with daily activity as normal, test both ways")
@@ -290,7 +302,7 @@ def main(argv=None) -> int:
     os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 
     print("loading PPG-DaLiA…")
-    data = load_features(with_wave="wave" in a.models)
+    data = load_features(with_wave=bool({"wave", "ae+hr", "ae+ctx"} & set(a.models)))
     if a.mixed:
         mixed(data)
         return 0

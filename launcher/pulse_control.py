@@ -626,6 +626,9 @@ class App:
         self._btn(row, "Daily-life false alarms", lambda: self.run(
             "dalia", "Daily-life false alarms (PPG-DaLiA)", ["-m", "anomaly.dalia", "--live"]),
             when=lambda: self.ready() and not self.is_running("dalia"))
+        self._btn(row, "Master's AE + HR weights", lambda: self.run(
+            "ensemble", "Master's AE + HR weights", ["-m", "anomaly.ensemble"]),
+            when=lambda: self.ready() and not self.is_running("ensemble"))
 
         row = self._section(f, "Data store", "Subjects, baselines, sessions and flags (data/pulse.db).")
         self._btn(row, "Summary", lambda: self.run("db", "Store summary", ["-m", "anomaly.db"]),

@@ -208,7 +208,7 @@ not heart rate in disguise.
 | context AE, accelerometer | 0.817 | 0.673 | 2.8 | 9% |
 | **context AE, pulse-derived motion** | 0.778 | 0.621 | 2.6 | **12%** |
 | context AE, both | 0.808 | 0.662 | 1.5 | 9% |
-| waveform AE (the master's today) | 0.732 | 0.577 | 0.6 | 17% |
+| waveform AE (the master's until 2026-11-01) | 0.732 | 0.577 | 0.6 | 17% |
 
 - pulse-derived motion keeps most of what the accelerometer buys: busiest-calm
   false alarms 25% → 12% (9% with the accelerometer), on hardware we already have.
@@ -224,7 +224,7 @@ not heart rate in disguise.
   task (S5), the context model explains the HR rise away (AUROC 0.52 vs HR's 0.98).
   the protocol's "keep the sensor hand still" matters for it.
 
-reproduce: `./run anomaly.context --motion pulse`; export with `--export`.
+reproduce: `./run anomaly.context --motion pulse`; export with `--export --motion pulse`.
 
 ## daily life: false alarms on PPG-DaLiA (2026-10-31)
 
@@ -244,7 +244,8 @@ false alarms per hour over each whole recording:
 | detector | line at 3σ (slider default) | line at 5σ |
 |---|---|---|
 | heart rate up (board) | 10.2 | 3.2 |
-| waveform autoencoder (master) | 9.6 | 2.2 |
+| waveform autoencoder | 9.6 | 2.2 |
+| **autoencoder + heart rate up (the master)** | 9.7 | 2.3 |
 | **HR + accelerometer, fitted on WESAD calm** | **6.5** | **1.7** |
 | HR + accelerometer, fitted with daily life as normal | 9.2 | 2.4 |
 | HR + pulse-derived motion, fitted with daily life as normal | 9.5 | 1.9 |
@@ -324,3 +325,97 @@ artifacts: `anomaly/saved/ae_int8.tflite` (+ `ae_float32.tflite`). regenerate:
 ```
 
 (windowed data is cached after the first run, so re-runs skip the 13 GB read.)
+
+## the master runs autoencoder + heart rate (2026-11-01)
+
+the master's verdict wins while the PC is connected, and the autoencoder alone was
+the weaker stress detector (0.732 vs the board's 0.865). it now scores the two
+added with equal weight (`anomaly/ensemble.py`, `MasterScorer` in `anomaly.fleet`):
+
+    score = ae + W * (hr - 71.78),   W = 0.054 / 8.256
+
+each term in units of its own robust spread over calm, so it is z(ae) + z(hr) in the
+autoencoder's units and the live scale, calibration and thresholds read it unchanged.
+the autoencoder's spread is taken on people it never saw (0.0545 WESAD
+leave-one-subject-out, 0.0536 PPG-DaLiA sitting); in-sample WESAD reads 0.0374
+because the deployed model was trained on them.
+
+| | PR-AUC (WESAD LOSO) | recall@90% spec | K=8 FA/h, WESAD calm | FA/h daily life, 3σ / 5σ |
+|---|---|---|---|---|
+| autoencoder alone (the master until now) | 0.732 | 0.577 | 0.6 | 9.6 / 2.2 |
+| **autoencoder + heart rate up (the master)** | **0.852** | **0.767** | 1.3 | 9.7 / 2.3 |
+| heart rate up (the board) | 0.865 | 0.813 | 4.3 | 10.2 / 3.2 |
+
+- the master now catches stress about as well as the board's rule (0.013 apart,
+  under the ~0.03 run-to-run noise) and keeps an AI model in the loop.
+- in daily life it raises the autoencoder's false alarms, not heart rate's.
+- the WESAD row is the leave-one-subject-out run above; the deployed int8 model
+  was trained on all 15 WESAD subjects, so it cannot be re-scored there cleanly.
+  PPG-DaLiA is unseen by it.
+- stored scores are tagged with a new model (`ae_int8.tflite + hr up`); a wearer
+  calibrated before this should recalibrate, since `k_sigma` was measured on the
+  autoencoder's scale alone.
+
+reproduce: `./run anomaly.ensemble`, `./run anomaly.dalia --live --models hr wave ae+hr`.
+
+## the master uses the board's accelerometer (2026-11-01)
+
+the Rev F board's BNO086 now streams 32 Hz in the WESAD wristband's units (1 g reads
+64.1), so the HR + accelerometer context model fitted on WESAD applies to it as is.
+boards that send it are scored with heart rate *above what the movement explains*
+in place of plain heart rate; boards without keep autoencoder + heart rate.
+
+| master score | PR-AUC (WESAD LOSO) | K=8 FA/h, WESAD calm | busiest calm flagged | FA/h daily life, 3σ / 5σ |
+|---|---|---|---|---|
+| autoencoder + heart rate (no IMU) | 0.852 | 1.3 | 20% | 9.7 / 2.3 |
+| autoencoder + HR vs motion, equal | 0.838 | 1.3 | 15% | 9.6 / 2.2 |
+| **¼ autoencoder + HR vs motion (IMU boards)** | **0.846 ± 0.162** (recall@90 0.727) | 2.4 | — | **7.1 / 2.3** |
+| ½ autoencoder + HR vs motion | 0.848 | 1.7 | — | 8.7 / 2.4 |
+| HR vs motion alone | 0.817 | 2.8 | 9% | 6.5 / 1.7 |
+
+- at the default line the motion-aware master raises **27% fewer false alarms in daily
+  life** (flagged time while sitting / driving / working 6/5/7% → 2/2/5%) and catches
+  stress as well (0.846 vs 0.852, inside the ~0.03 noise). at 5σ the two are level.
+- the cost is on seated calm: sustained false alarms 1.3 → 2.4 /h at K=8.
+- equal weights do nothing for daily life: the autoencoder half is what fires there
+  (alone 9.6 /h). a quarter share keeps its stress ranking and drops most of that.
+- **the quarter was picked from four weights on these same data**, so the row is
+  mildly optimistic. the context model's calm spread (CTX_MED −0.170, CTX_MAD 0.966)
+  is from leave-one-subject-out scores.
+- **not shown on our sensor.** the board's axes are not the E4's, and a fingertip or
+  strap moves differently from a wrist band; the per-axis features may shift. the
+  magnitude features should not.
+
+model: `saved/context_acc.npz` (4.7 KB, numpy). reproduce:
+`./run anomaly.context --export --motion acc`,
+`./run anomaly.dalia --live --models ae+hr ae+ctx`.
+
+## the board's own detector uses the accelerometer too (2026-11-01)
+
+the board cannot run the autoencoder, so its choices are heart rate and the
+HR-above-motion model (anomaly.context, the same `context_acc.npz` the master uses,
+~500 numbers in C). same LOSO split; the live columns replay calm → stress through
+the board's scale (3-min memory, 3σ, 5 s ticks):
+
+| board score | PR-AUC | recall@90 | K=8 FA/h | busiest calm flagged | live: calm flagged | stress onsets caught | DaLiA FA/h 3σ / 5σ |
+|---|---|---|---|---|---|---|---|
+| heart rate up (before) | 0.865 ± 0.154 | 0.813 | 4.3 | 25% | 7.8% | 15/15 | 10.2 / 3.2 |
+| HR vs motion alone | 0.817 ± 0.172 | 0.673 | 2.8 | 9% | 8.4% | 13/15 | 6.5 / 1.7 |
+| HR + HR vs motion, equal | 0.872 ± 0.132 | 0.763 | 3.0 | 14% | 9.1% | 15/15 | 10.4 / 3.4 |
+| **½ HR + HR vs motion (the board now)** | **0.854 ± 0.145** | 0.728 | 3.2 | **12%** | 8.1% | **15/15** | **8.8 / 2.9** |
+
+and the master on WESAD, with and without the accelerometer: PR-AUC 0.846 vs 0.852,
+busiest calm flagged 12% vs 20%, live calm flagged 7.9% vs 6.4%, onsets 15/15 both.
+**on WESAD the accelerometer does not catch more stress, for either.** what it buys
+is fewer flags while people move: the busiest calm halves, and daily life drops.
+
+- the board keeps every onset and halves the busy-calm false flags; daily-life false
+  alarms −14% / −9%. "HR vs motion alone" cuts them most but misses 2 of 15 onsets.
+- the half was picked from three weights on the same data: mildly optimistic.
+- the C port: `bd_acc_features` + `bd_ctx` + `bd_score_motion` in board_detector.h;
+  a numpy mirror of the C arithmetic matches `acc_features` exactly and
+  `ContextScorer` to 2e-5 on 21 minutes of PPG-DaLiA movement, and the boot
+  self-test (`self=pass`) checks it on the chip. live on the Rev F: `dmode=motion`,
+  ~225 ms per 1 Hz tick on core 0 (was ~210), calm level 0–25%.
+- a board that loses or gains its accelerometer restarts its live reference: the two
+  scores are on different scales.

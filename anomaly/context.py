@@ -31,7 +31,8 @@ compute. `--motion both` uses all of them.
     python -m anomaly.context
     python -m anomaly.context --motion pulse
     python -m anomaly.context --models hr reg --max-subjects 3
-    python -m anomaly.context --export     # -> saved/context_pulse.npz, for protocol reports
+    python -m anomaly.context --export --motion pulse   # -> saved/context_pulse.npz, protocol reports
+    python -m anomaly.context --export --motion acc     # -> saved/context_acc.npz, the master
 """
 from __future__ import annotations
 
@@ -168,6 +169,9 @@ class ContextAE:
 
 
 SAVED = os.path.join(os.path.dirname(os.path.abspath(__file__)), "saved", "context_pulse.npz")
+# the same model with the wrist accelerometer as context (7 acc_features, 1/64 g
+# at 32 Hz): what the master scores boards that have an IMU with
+SAVED_ACC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "saved", "context_acc.npz")
 
 
 class ContextScorer:
@@ -200,15 +204,19 @@ class ContextScorer:
         return float(hr), float(self.score(np.array([hr]), pulse_motion(w, f)[None])[0])
 
 
-def export(data, path: str = SAVED):
-    """fit on ALL 15 subjects' calm, pulse-derived motion, and save."""
-    pm = load_pulse_motion(data)
+def export(data, motion: str = "pulse"):
+    """fit on ALL 15 subjects' calm and save: pulse-derived motion
+    (saved/context_pulse.npz) or the wrist accelerometer (saved/context_acc.npz)."""
+    if motion == "acc":
+        path, mo_by = SAVED_ACC, {s: data[s]["ACC"] for s in data}
+    else:
+        path, mo_by = SAVED, load_pulse_motion(data)
     calm = {s: data[s]["cond"] == NORMAL for s in data}
     hr = np.concatenate([data[s]["BVP"][calm[s], 0] for s in data]).astype(np.float64)
-    mo = np.vstack([pm[s][calm[s]] for s in data]).astype(np.float64)
+    mo = np.vstack([mo_by[s][calm[s]] for s in data]).astype(np.float64)
     hr = np.where(np.isnan(hr), np.nanmedian(hr), hr)
     ae = ContextAE().fit(hr, mo)
-    ae.save(path, "pulse")
+    ae.save(path, motion)
     # the numpy scorer must reproduce the network it was cut from
     ref = ae.score(hr[:200], mo[:200])
     got = ContextScorer(path).score(hr[:200], mo[:200])
@@ -271,8 +279,9 @@ def main(argv=None) -> int:
                     help="context: the wrist accelerometer, motion read off the pulse "
                          "signal (what a pulse-only board can see), or both")
     ap.add_argument("--export", action="store_true",
-                    help="fit the pulse-motion model on all subjects' calm and write "
-                         "anomaly/saved/context_pulse.npz (what protocol reports re-score with)")
+                    help="fit on all subjects' calm and save: --motion pulse writes "
+                         "saved/context_pulse.npz (protocol reports), --motion acc "
+                         "saved/context_acc.npz (the master, on boards with an IMU)")
     a = ap.parse_args(argv)
     os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 
@@ -280,7 +289,7 @@ def main(argv=None) -> int:
     print("loading channel features…")
     data = load_features(subjects, 60.0, 5.0)
     if a.export:
-        return 0 if export(data) else 1
+        return 0 if export(data, "acc" if a.motion == "acc" else "pulse") else 1
     motion = {s: data[s]["ACC"] for s in data}
     if a.motion != "acc":
         pm = load_pulse_motion(data)

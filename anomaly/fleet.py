@@ -4,8 +4,9 @@ ONE command for the whole system.
 
     python3 -m anomaly.fleet
 
-it scans the local subnet for boards, opens a websocket to each, runs the
-autoencoder on their streams, and pushes each verdict back to that board's
+it scans the local subnet for boards, opens a websocket to each, scores their
+streams with the autoencoder plus heart rate going up (anomaly.ensemble), and
+pushes each verdict back to that board's
 /flag. a roster at http://localhost:8002/ lists what it found; clicking a device
 opens THAT device's own dashboard, served from the device itself.
 
@@ -21,9 +22,8 @@ the division of labour:
 each board is exclusive to its own user: a device's dashboard shows only that
 device, and boards never learn about each other. only the master sees the fleet.
 
-when the master is unreachable a board keeps sensing, keeps serving its page and
-keeps showing HR/SpO2 -- it just reports no verdict. an on-device model is what
-would fill that slot later.
+when the master is unreachable the board's own detector (heart rate up) takes
+over; the master's verdict wins whenever it is fresh.
 """
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ from . import quality
 from .db import DEFAULT_PATH as DB_PATH, Db, import_legacy_scorers
 from .infer import SAVE_DIR
 from .protocol import DEFAULT_PLAN, ProtocolRun
-from .wesad import FS
+from .wesad import FS, FS_ACC as ACC_FS
 
 WIN = 60 * FS
 
@@ -397,7 +397,7 @@ class Device:
     def __init__(self, dev_id: str, ip: str, det, db):
         self.id = dev_id
         self.ip = ip
-        self.det = det                    # LiveAnomalyDetector, thresholds swapped per subject
+        self.det = det                    # MasterScorer: autoencoder + heart rate up
         self.db = db
         self.buf: deque = deque(maxlen=HIST)   # raw history, longer than a window
         self.pend: deque = deque()        # the newest 2 s, not yet in buf
@@ -407,6 +407,10 @@ class Device:
         self.score = 0.0
         self.bpm = None
         self.spo2 = None
+        self.motion = None                # 0..1 from the board's accelerometer
+        # the accelerometer itself, [x, y, z] in 1/64 g at 32 Hz (the WESAD
+        # wristband's units), the last minute of it: one model window
+        self.acc: deque = deque(maxlen=60 * ACC_FS)
         self.contact = False
         self.last_seen = 0.0
         self.last_contact = 0.0           # monotonic, for the idle-session timer
@@ -510,7 +514,7 @@ class Device:
             return
         self.session_id = self.db.open_session(
             self.subject["id"], self.id, "monitor",
-            model_id=getattr(self.det, "model_id", None), sens=self.sens)
+            model_id=self.model_id(), sens=self.sens)
 
     def end_session(self):
         if self.event_id is not None:
@@ -534,12 +538,12 @@ class Device:
         self.end_session()
         sess = self.db.record_session(
             self.subject["id"], self.id, "calibration", started, time.time(),
-            model_id=getattr(self.det, "model_id", None),
+            model_id=self.model_id(),
             notes=f"{r['n']} calm windows")
         self.db.save_baseline(self.subject["id"], r["threshold"], r["ref_lo"], r["ref_hi"],
                               n_windows=r["n"], fs=int(FS), win_len=int(WIN),
                               session_id=sess,
-                              model_id=getattr(self.det, "model_id", None),
+                              model_id=self.model_id(),
                               source="device", k_sigma=r["k_sigma"])
         self.recent.clear()
         self.refresh()
@@ -563,6 +567,13 @@ class Device:
         """
         return sens_to_level(self.sens) * Z_FULL
 
+    def model_id(self):
+        """which scorer this board's readings come from: with motion or without.
+        the two score on different scales, so a stored level needs to say which."""
+        if self.motion is not None:
+            return getattr(self.det, "model_id_ctx", None)
+        return getattr(self.det, "model_id", None)
+
     def refresh_threshold(self):
         """recompute the drawn line. cheap, and safe to call every tick."""
         self.thr_level = float(np.clip(sens_to_level(self.sens), 0.0, 1.0))
@@ -581,7 +592,9 @@ class Device:
             return None, r["quality"], r["reason"]
         note = ("" if not r["dropped"] else
                 "skipped %d s of movement (%.1fx)" % (r["dropped"], r["env"]))
-        return self.det.score(r["window"]), r["quality"], note
+        # a board with an accelerometer is scored with its movement in the picture
+        acc = list(self.acc) if self.motion is not None else None
+        return self.det.score(r["window"], acc=acc), r["quality"], note
 
     def apply(self, raw, q=None):
         """turn a raw reconstruction error into a level and a flag for THIS person,
@@ -714,6 +727,7 @@ class Device:
             "connected": self.connected and stale is not None and stale < 5,
             "contact": self.contact,
             "bpm": self.bpm, "spo2": self.spo2,
+            "motion": self.motion,
             "level": None if self.level is None else round(self.level, 3),
             "flag": self.flag,
             "score": round(self.score, 5),
@@ -920,12 +934,16 @@ class Fleet:
                         dev.spo2 = m.get("spo2")
                         dev.ond = m.get("ond")        # None from older firmware
                         dev.finger = d.get("finger")  # likewise
+                        dev.motion = m.get("motion")  # likewise; None with no IMU
+                        acc = m.get("acc") or []
+                        dev.acc.extend(acc)
                         if m.get("sens") is not None:
                             dev.sens = float(m["sens"])   # the user moved the slider
                         now_c = time.monotonic()
                         if dev.protocol:
                             # every frame, contact or not: gaps are part of the record
-                            dev.protocol.feed(m.get("idx"), m.get("bvp"), dev.contact)
+                            dev.protocol.feed(m.get("idx"), m.get("bvp"), dev.contact,
+                                              acc=acc)
                         if dev.contact:
                             dev.last_contact = now_c
                             dev.ensure_session()          # nobody presses start
@@ -1313,6 +1331,7 @@ def build_app(fleet: Fleet):
 
 
 async def amain(args) -> int:
+    from .ensemble import AE_MAD, AE_W_CTX, CTX_MAD, CTX_MED, W, MasterScorer
     from .infer import LiveAnomalyDetector
 
     if args.hotspot:
@@ -1365,11 +1384,20 @@ async def amain(args) -> int:
         print(f"  closed {stale} session(s) left open by a previous run", flush=True)
 
     print("  loading model… (~45 s: TensorFlow + the 4 MB int8 model)", flush=True)
-    det = LiveAnomalyDetector()          # thresholds come per subject, not from here
+    # the autoencoder plus heart rate going up: catches WESAD stress at PR-AUC
+    # 0.852 against the autoencoder's 0.732; with a board's accelerometer, HR
+    # above what its movement explains instead (anomaly/ensemble.py)
+    det = MasterScorer(LiveAnomalyDetector())   # thresholds come per subject
     # every stored score records which model produced it: swap the model and the
     # thresholds mean something different, so a level without one is unreadable.
-    det.model_id = db.register_model("ae_int8.tflite",
-                                     os.path.join(SAVE_DIR, "ae_int8.tflite"))
+    det.model_id = db.register_model("ae_int8.tflite + hr up",
+                                     os.path.join(SAVE_DIR, "ae_int8.tflite"),
+                                     notes="score = ae + %.5f * (hr - 71.78)" % W)
+    # boards with an accelerometer: a quarter of the AE + HR above motion
+    det.model_id_ctx = db.register_model("ae_int8.tflite x0.25 + hr vs motion",
+                                         os.path.join(SAVE_DIR, "context_acc.npz"),
+                                         notes="score = %.2f*ae + %.3f*(ctx - %.3f)/%.3f"
+                                         % (AE_W_CTX, AE_MAD, CTX_MED, CTX_MAD))
     print("  model ready\n")
 
     fleet = Fleet(det, subnets, args.device or [], db)

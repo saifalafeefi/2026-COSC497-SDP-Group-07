@@ -134,6 +134,12 @@ For the Rev F wearable the module is an **ESP32-S3-WROOM-1-N8R8** (marking
 (64Mb)` with `Partition Scheme: 8M with spiffs (3MB APP/1.5MB SPIFFS)` or
 `default_8MB`, and keep `PSRAM: OPI PSRAM` — the detector still needs it.
 
+**the slider survives a reboot.** the board owns the sensitivity slider and the
+master copies what it reports, so when the board kept it only in RAM every
+reboot or reflash reset it to 0.5 and the master followed, losing the line a
+calibration had set. `pulse_headless` now keeps it in NVS (`ui/sens`, saved 2 s
+after the slider stops). `pulse_display` does not yet.
+
 **Rev F LEDs.** the red LED is the charger's (MCP73831 STAT, on VBUS): on while
 charging, off when full or unplugged. the ESP32 can't read or drive it, and no
 pin sees the battery, so the firmware can't report charge — that needs a
@@ -225,7 +231,16 @@ Already fixed — do not re-diagnose these:
   detector in `anomaly/baseline.py` (0.64 PR-AUC vs the autoencoder's 0.71) is
   the cheap path: no TFLM, no arena sizing, and that gap *is* the "accuracy cost"
   the DoD asks to be reported.
-- **No accelerometer** on the rig.
+- **the Rev F board has an accelerometer:** the 0x4A device is a BNO086 IMU (I2C
+  on GPIO8/9, RST GPIO7, INT GPIO16, BOOT GPIO38). `pulse_headless` reads it,
+  averages the hub's ~65 Hz down to 32 Hz in 1/64 g (WESAD's units: 1 g reads
+  64.1), sends `acc` + a 0..1 `motion` in every frame, and puts it to sleep with
+  the board. the master keeps the last minute per board, the roster and Pulse
+  Watch show still/moving, and protocol sessions save `raw_acc`. the master
+  scores these boards as 1/4 autoencoder + HR above what the movement explains
+  (`anomaly/ensemble.py`); the board's own detector, half HR + HR above motion
+  (`board_detector.h` `bd_score_motion`, self-test passes on hardware). the
+  devkit rig still has none.
 - `/dev` is no longer baked into the board (it scores against WESAD labels a
   wearer doesn't have); under `serve --source device` it still shows those
   empty WESAD-only panels.

@@ -340,6 +340,80 @@ static inline void bd_features(BdWork *w, const float *x, float f[BD_NF]) {
 // calm, and z only counts upward, so a falling HR never flags
 static inline float bd_score(const float f[BD_NF]) { return f[0]; }
 
+// ---------------------------------------------------------- motion context
+// boards with an accelerometer. anomaly.channels.acc_features over a minute of
+// [x, y, z] in 1/64 g: the magnitude's mean, std, mean step, max, then each
+// axis's std. population std (numpy's default), in double like numpy.
+static inline void bd_acc_features(const int16_t (*a)[3], int n, float out[BD_ACC_NF]) {
+  double sm = 0.0, sm2 = 0.0, step = 0.0, mx = -1.0, prev = 0.0;
+  double sx = 0.0, sy = 0.0, sz = 0.0, sx2 = 0.0, sy2 = 0.0, sz2 = 0.0;
+  for (int i = 0; i < n; i++) {
+    double x = a[i][0], y = a[i][1], z = a[i][2];
+    double m = sqrt(x * x + y * y + z * z);
+    sm += m;
+    sm2 += m * m;
+    if (i) step += fabs(m - prev);
+    prev = m;
+    if (m > mx) mx = m;
+    sx += x; sy += y; sz += z;
+    sx2 += x * x; sy2 += y * y; sz2 += z * z;
+  }
+  double mean = sm / n;
+  double var = sm2 / n - mean * mean;
+  out[0] = (float)mean;
+  out[1] = (float)sqrt(var > 0.0 ? var : 0.0);
+  out[2] = (float)(n > 1 ? step / (n - 1) : 0.0);
+  out[3] = (float)mx;
+  double vx = sx2 / n - (sx / n) * (sx / n);
+  double vy = sy2 / n - (sy / n) * (sy / n);
+  double vz = sz2 / n - (sz / n) * (sz / n);
+  out[4] = (float)sqrt(vx > 0.0 ? vx : 0.0);
+  out[5] = (float)sqrt(vy > 0.0 ? vy : 0.0);
+  out[6] = (float)sqrt(vz > 0.0 ? vz : 0.0);
+}
+
+// anomaly.context.ContextScorer: the heart rate above what this minute's
+// movement explains, in standardised HR units. the network is shown the motion
+// with the HR hidden and asked for the HR; ctx is the real HR minus that guess.
+static inline float bd_ctx(float hr, const float mo[BD_ACC_NF]) {
+  float x[BD_CTX_NIN], in[BD_CTX_NIN + 1], h1[16], h2[4], h3[16], o[8];
+  for (int i = 0; i < BD_CTX_NIN; i++) {
+    float v = i == 0 ? hr : mo[i - 1];
+    if (isnan(v)) v = BD_CTX_MED[i];
+    x[i] = (v - BD_CTX_MU[i]) / BD_CTX_SD[i];
+    in[i] = x[i];
+  }
+  in[0] = 0.0f;                              // HR hidden
+  in[BD_CTX_NIN] = 1.0f;
+  for (int j = 0; j < 16; j++) {
+    float a = BD_CTX_B0[j];
+    for (int i = 0; i < BD_CTX_NIN + 1; i++) a += in[i] * BD_CTX_W0[i][j];
+    h1[j] = a > 0.0f ? a : 0.0f;
+  }
+  for (int j = 0; j < 4; j++) {
+    float a = BD_CTX_B1[j];
+    for (int i = 0; i < 16; i++) a += h1[i] * BD_CTX_W1[i][j];
+    h2[j] = a > 0.0f ? a : 0.0f;
+  }
+  for (int j = 0; j < 16; j++) {
+    float a = BD_CTX_B2[j];
+    for (int i = 0; i < 4; i++) a += h2[i] * BD_CTX_W2[i][j];
+    h3[j] = a > 0.0f ? a : 0.0f;
+  }
+  for (int j = 0; j < 8; j++) {
+    float a = BD_CTX_B3[j];
+    for (int i = 0; i < 16; i++) a += h3[i] * BD_CTX_W3[i][j];
+    o[j] = a;
+  }
+  return x[0] - o[0];
+}
+
+// the motion-aware score, in beats per minute's scale so the live scale's
+// spread floor (a fraction of the centre) behaves as it does for plain HR
+static inline float bd_score_motion(float hr, const float mo[BD_ACC_NF]) {
+  return BD_CTX_HR_W * hr + BD_HR_MAD * (bd_ctx(hr, mo) - BD_CTX_CALM_MED) / BD_CTX_CALM_MAD;
+}
+
 // ------------------------------------------------------------ movement gate
 // anomaly/quality.clean_window: drop the loud seconds, back-fill from older
 // clean history, then interpolate across sample-level knocks.
@@ -556,6 +630,35 @@ static inline bool bd_selftest(BdWork *w, char *msg, size_t len) {
       return false;
     }
   }
+  // motion: the synthetic minute of accelerometer, its features, the model.
+  // the int16 pattern borrows the start of w->hist (5760 B of its 38 KB)
+  int16_t (*acc)[3] = (int16_t (*)[3])w->hist;
+  for (int i = 0; i < BD_ACC_WIN; i++) {
+    acc[i][0] = (int16_t)((i * 37) % 41 - 20);
+    acc[i][1] = (int16_t)(i % 7 - 3);
+    acc[i][2] = (int16_t)(64 + (i * 11) % 13 - 6);
+  }
+  float mo[BD_ACC_NF];
+  bd_acc_features(acc, BD_ACC_WIN, mo);
+  for (int i = 0; i < BD_ACC_NF; i++) {
+    if (!bd__close(mo[i], BD_TEST_ACC_F[i], 1e-4f)) {
+      snprintf(msg, len, "fail acc f%d got %.6g want %.6g", i, (double)mo[i],
+               (double)BD_TEST_ACC_F[i]);
+      return false;
+    }
+  }
+  float cx = bd_ctx(BD_TEST_SCORE[0], BD_TEST_ACC_F);
+  if (!bd__close(cx, BD_TEST_CTX, 1e-3f)) {
+    snprintf(msg, len, "fail ctx got %.6g want %.6g", (double)cx, (double)BD_TEST_CTX);
+    return false;
+  }
+  float ms = bd_score_motion(BD_TEST_SCORE[0], BD_TEST_ACC_F);
+  if (!bd__close(ms, BD_TEST_MSCORE, 1e-3f)) {
+    snprintf(msg, len, "fail motion score got %.6g want %.6g", (double)ms,
+             (double)BD_TEST_MSCORE);
+    return false;
+  }
+
   const int nh = 2 * BD_WIN;
   for (int i = 0; i < nh; i++) w->hist[i] = BD_TEST_X[0][i % BD_WIN];
   for (int i = 70 * BD_FS; i < 75 * BD_FS; i++) w->hist[i] *= 6.0f;

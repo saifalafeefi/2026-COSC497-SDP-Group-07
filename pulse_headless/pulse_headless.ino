@@ -54,6 +54,7 @@
 // `python -m anomaly.board_export`; board_detector.h is the algorithm.
 #include <esp_heap_caps.h>
 #include <esp_sleep.h>
+#include <driver/gpio.h>  // gpio_hold_en: the IMU's reset line across deep sleep
 #include "board_detector.h"
 
 // Defined up here, not beside verdictNow(), on purpose: the Arduino IDE writes a
@@ -89,7 +90,8 @@ struct Verdict {
 // =====================================================
 // The display build uses GPIO17/18. This board wires the sensor to GPIO8/9;
 // its own bring-up firmware announces "Rev F MAX30102 test: SDA=8, SCL=9" and
-// its I2C scan answers at 0x57 (the MAX30102) and 0x4A (unidentified).
+// its I2C scan answers at 0x57 (the MAX30102) and 0x4A (the BNO086 IMU: RST
+// GPIO7, INT GPIO16, BOOT GPIO38 -- the accelerometer, see bnoBegin()).
 #define MAX_SDA    8
 #define MAX_SCL    9
 
@@ -123,6 +125,23 @@ struct Verdict {
 // Full drive is glaring, so it runs on PWM at STATUS_LED_DUTY / 255.
 #define STATUS_LED_PIN  2
 #define STATUS_LED_DUTY 6
+
+// =====================================================
+// U4, the BNO086 IMU -- the wrist accelerometer
+// =====================================================
+// Shares the MAX30102's I2C bus (GPIO8/9) at 0x4A; PS0/PS1 are grounded, so it
+// speaks SHTP over I2C. RST, INT (low = a packet is waiting) and BOOT (high =
+// run the application, not the bootloader) are on their own pins. Samples are
+// kept in the WESAD wristband's units -- 1/64 g at 32 Hz -- so anomaly's
+// accelerometer features read them as they read WESAD and PPG-DaLiA.
+#define BNO_ADDR      0x4A
+#define BNO_RST       7
+#define BNO_INT       16
+#define BNO_BOOT      38
+#define ACC_HZ        32
+#define ACC_CAP       96             // 3 s ring; a frame drains ~4
+#define ACC_MOT_N     64             // motion = spread of |a| over the last 2 s
+#define ACC_MOT_FULL  0.25f          // g of spread that reads as motion 1.0
 
 // MAX30102 object
 MAX30105 particleSensor;
@@ -234,6 +253,13 @@ char hostSubject[28] = "";
 // keeps a copy in NVS, so a board that reboots with no master in reach still
 // says whose it is.
 volatile bool wearerDirty = true;
+// The sensitivity slider lives here, and the master copies whatever the board
+// reports. Kept only in RAM it came back at 0.5 after every reboot or reflash,
+// and the master then adopted 0.5 too -- quietly throwing away the line a
+// calibration had set. So it is kept in NVS as well: written by the main loop
+// once the slider has been still for SENS_SAVE_MS (a drag is many updates).
+#define SENS_SAVE_MS 2000
+volatile uint32_t sensChangedMs = 0;  // 0 = nothing waiting to be saved
 int32_t hostWait = 0;                 // seconds of warm-up left
 uint32_t irDcDisplay = 0;             // slow IR average, for the no-finger check
 // Is a finger on the sensor? The IR level alone cannot say. The Rev F board's
@@ -676,7 +702,15 @@ enum { BD_ST_OFF = 0, BD_ST_IDLE, BD_ST_WARM, BD_ST_HOLD, BD_ST_OK };
 static const char *BD_ST_NAME[] = {"off", "idle", "warm", "hold", "ok"};
 volatile int8_t bdStateId = BD_ST_OFF;
 volatile float bdLevel = -1.0f;              // 0..1, or -1 while there is none
-volatile float bdScore = 0.0f;               // heart rate, bpm: what the scale reads
+volatile float bdScore = 0.0f;               // what the scale reads: HR in bpm, or with
+                                             // motion 1/2 HR + HR above motion, same scale
+volatile int8_t bdMode = 0;                  // 0 heart rate, 1 heart rate vs motion
+// the accelerometer's last-minute features, worked out on the main loop once a
+// second (it owns the samples) and read by the detector task on core 0.
+// accFeatMs = 0: none fresh enough to judge by
+static portMUX_TYPE accFeatMux = portMUX_INITIALIZER_UNLOCKED;
+static float accFeat[BD_ACC_NF];
+static uint32_t accFeatMs = 0;
 volatile int8_t bdFlag = 0;
 volatile int32_t bdWait = 0;                 // seconds until it can say anything
 volatile uint32_t bdMs = 0;                  // what the last tick cost
@@ -772,6 +806,23 @@ void bdTick() {
     bdTickMs = millis();
     return;
   }
+  // with a fresh minute of accelerometer, score the heart rate against what
+  // the movement explains. the two scores sit on different scales, so a switch
+  // between them starts the wearer's reference afresh rather than mixing them
+  float mo[BD_ACC_NF];
+  bool haveMo = false;
+  portENTER_CRITICAL(&accFeatMux);
+  if (accFeatMs != 0 && millis() - accFeatMs < 3000) {
+    memcpy(mo, accFeat, sizeof(mo));
+    haveMo = true;
+  }
+  portEXIT_CRITICAL(&accFeatMux);
+  int8_t mode = haveMo ? 1 : 0;
+  if (mode != bdMode) {
+    bd_scale_reset(&bdS);
+    bdMode = mode;
+  }
+  if (haveMo) sc = bd_score_motion(sc, mo);
   bd_scale_apply(&bdS, sc, hostSens, bdW.dbuf);
   bdScore = sc;
   if (bdS.has_level) {
@@ -866,6 +917,7 @@ Verdict verdictNow() {
 // nothing else in the sketch performs them.
 void drawStatus() {
   wearerPoll();                  // cheap unless the name changed; writes NVS
+  sensPoll();                    // likewise for the slider, once it is still
 
   // The demo flag is only ever cleared here. Every reader TTL-guards it as
   // well, so this is belt and braces -- but dropping it would leave hostDemo
@@ -902,6 +954,230 @@ void statusLedPoll() {
     lit = on;
     ledcWrite(STATUS_LED_PIN, on ? STATUS_LED_DUTY : 0);
   }
+}
+
+// =====================================================
+// BNO086 accelerometer
+// =====================================================
+// SHTP: every packet starts with a 4-byte header (length LSB/MSB with bit 15
+// = continuation, channel, sequence). A read always starts at a header, so a
+// packet is read as its header first, then again in chunks that each repeat
+// it. Channel 2 is the hub's control channel, 3 its sensor reports. Report
+// 0x01 is the calibrated accelerometer, Q8 m/s^2, usually behind a 0xFB base
+// timestamp. Runs on the main loop, like every other user of the bus.
+static bool     bnoOk = false;
+static uint8_t  bnoSeq[6] = {0};
+static uint8_t  bnoBuf[128];
+static uint16_t bnoLen = 0;
+static uint8_t  bnoChan = 0;
+static uint32_t bnoLastAccMs = 0, bnoTryMs = 0, bnoResets = 0;
+static int16_t  accRing[ACC_CAP][3];
+static uint16_t accHead = 0, accTail = 0;
+static uint32_t accTotal = 0;
+static float    accMag[ACC_MOT_N];       // |a| in g, for the motion figure
+static int16_t  accWin[BD_ACC_WIN][3];   // the last minute, for the detector
+static int16_t  accLin[BD_ACC_WIN][3];   // the same, oldest first
+static uint16_t accWinHead = 0;
+static uint16_t accWinN = 0;
+static uint16_t accMagN = 0, accMagI = 0;
+
+static bool bnoSend(uint8_t chan, const uint8_t *d, uint8_t n) {
+  Wire.beginTransmission(BNO_ADDR);
+  uint16_t len = n + 4;
+  Wire.write(len & 0xFF);
+  Wire.write(len >> 8);
+  Wire.write(chan);
+  Wire.write(bnoSeq[chan]++);
+  Wire.write(d, n);
+  return Wire.endTransmission() == 0;
+}
+
+static bool bnoRead() {
+  if (Wire.requestFrom(BNO_ADDR, 4) != 4) return false;
+  uint8_t h[4];
+  for (int i = 0; i < 4; i++) h[i] = Wire.read();
+  uint16_t len = ((uint16_t)(h[1] & 0x7F) << 8) | h[0];
+  bnoChan = h[2];
+  bnoLen = 0;
+  if (len <= 4) return len != 0;
+  len -= 4;
+  uint16_t got = 0;
+  while (got < len) {
+    uint16_t want = len - got;
+    if (want > 60) want = 60;
+    if (Wire.requestFrom(BNO_ADDR, (int)(want + 4)) != want + 4) return false;
+    for (int i = 0; i < 4; i++) Wire.read();
+    for (uint16_t i = 0; i < want; i++) {
+      uint8_t b = Wire.read();
+      if (got + i < sizeof(bnoBuf)) bnoBuf[got + i] = b;
+    }
+    got += want;
+  }
+  bnoLen = len < sizeof(bnoBuf) ? len : sizeof(bnoBuf);
+  return true;
+}
+
+static bool bnoEnableAcc() {
+  uint8_t sf[17] = {0xFD, 0x01};          // set feature: accelerometer
+  uint32_t us = 1000000UL / ACC_HZ;
+  sf[5] = us & 0xFF; sf[6] = (us >> 8) & 0xFF; sf[7] = (us >> 16) & 0xFF; sf[8] = us >> 24;
+  return bnoSend(2, sf, sizeof(sf));
+}
+
+static void bnoReset() {
+  bnoTryMs = millis();
+  memset(bnoSeq, 0, sizeof(bnoSeq));
+  digitalWrite(BNO_RST, LOW);
+  delay(10);
+  digitalWrite(BNO_RST, HIGH);
+}
+
+// At boot: reset it and wait for it to announce itself. Later resets don't
+// wait -- bnoPoll() turns the accelerometer back on when the hub says it has
+// restarted, so the sample loop never stalls on it.
+void bnoBegin() {
+  gpio_hold_dis((gpio_num_t)BNO_RST);      // held through the last deep sleep
+  pinMode(BNO_INT, INPUT_PULLUP);
+  pinMode(BNO_BOOT, OUTPUT);
+  digitalWrite(BNO_BOOT, HIGH);
+  pinMode(BNO_RST, OUTPUT);
+  bnoReset();
+  uint32_t t0 = millis();
+  bool seen = false;
+  while (millis() - t0 < 600) {
+    if (digitalRead(BNO_INT) == LOW && bnoRead()) seen = true;
+    delay(2);
+  }
+  bnoOk = seen && bnoEnableAcc();
+  bnoLastAccMs = millis();
+#if STREAM_ENABLED
+  Serial.println(bnoOk ? "# imu: BNO086 accelerometer on, 32 Hz"
+                       : "# imu: BNO086 did not answer -- no motion data");
+#endif
+}
+
+static void accPush(float ax, float ay, float az) {   // m/s^2 in
+  const float toE4 = 64.0f / 9.80665f;                // 1/64 g counts
+  accRing[accHead][0] = (int16_t)lroundf(ax * toE4);
+  accRing[accHead][1] = (int16_t)lroundf(ay * toE4);
+  accRing[accHead][2] = (int16_t)lroundf(az * toE4);
+  accHead = (accHead + 1) % ACC_CAP;
+  if (accHead == accTail) accTail = (accTail + 1) % ACC_CAP;   // drop the oldest
+  accTotal++;
+  memcpy(accWin[accWinHead], accRing[(accHead + ACC_CAP - 1) % ACC_CAP], sizeof(accWin[0]));
+  accWinHead = (accWinHead + 1) % BD_ACC_WIN;
+  if (accWinN < BD_ACC_WIN) accWinN++;
+  accMag[accMagI] = sqrtf(ax * ax + ay * ay + az * az) / 9.80665f;
+  accMagI = (accMagI + 1) % ACC_MOT_N;
+  if (accMagN < ACC_MOT_N) accMagN++;
+}
+
+// The hub rounds the asked-for rate to one it supports -- 32 Hz came back as
+// ~64. So measure what actually arrives and average it down to ACC_HZ: a box
+// average over each output period, which also keeps the faster rate from
+// aliasing into the 32 Hz the features were built on.
+static float    accSx = 0, accSy = 0, accSz = 0, accPhase = 0, accRate = ACC_HZ;
+static uint16_t accSn = 0;
+static uint32_t accRateMs = 0, accRateN = 0;
+
+static void accIn(float ax, float ay, float az) {
+  uint32_t now = millis();
+  accRateN++;
+  if (accRateMs == 0) accRateMs = now;
+  else if (now - accRateMs >= 2000) {
+    accRate = accRateN * 1000.0f / (now - accRateMs);
+    accRateMs = now;
+    accRateN = 0;
+  }
+  accSx += ax; accSy += ay; accSz += az; accSn++;
+  accPhase += ACC_HZ / (accRate > ACC_HZ ? accRate : (float)ACC_HZ);
+  if (accPhase >= 1.0f) {
+    accPhase -= 1.0f;
+    accPush(accSx / accSn, accSy / accSn, accSz / accSn);
+    accSx = accSy = accSz = 0;
+    accSn = 0;
+  }
+}
+
+// 0..1: how much |a| has varied over the last 2 s. Still reads ~0.01, a hand
+// moving ~0.2-0.6, walking higher. -1 with no IMU or too few samples.
+float accMotion() {
+  if (!bnoOk || accMagN < 16 || millis() - bnoLastAccMs > 2000) return -1.0f;
+  float m = 0, s = 0;
+  for (uint16_t i = 0; i < accMagN; i++) m += accMag[i];
+  m /= accMagN;
+  for (uint16_t i = 0; i < accMagN; i++) s += (accMag[i] - m) * (accMag[i] - m);
+  float sd = sqrtf(s / accMagN);
+  return sd >= ACC_MOT_FULL ? 1.0f : sd / ACC_MOT_FULL;
+}
+
+void bnoPoll() {
+  if (!bnoOk) return;                      // never answered at boot: not fitted
+  uint32_t now = millis();
+  if (now - bnoLastAccMs > 3000 && now - bnoTryMs > 10000) {
+    bnoResets++;                           // went quiet: kick it, carry on
+    bnoReset();
+  }
+  for (int k = 0; k < 3 && digitalRead(BNO_INT) == LOW; k++) {
+    if (!bnoRead()) return;
+    if (bnoChan == 1 && bnoLen >= 1 && bnoBuf[0] == 1) {   // it reset itself
+      bnoEnableAcc();
+      continue;
+    }
+    if (bnoChan != 3) continue;
+    uint16_t i = 0;
+    while (i < bnoLen) {
+      uint8_t id = bnoBuf[i];
+      if (id == 0xFB || id == 0xFA) { i += 5; continue; }  // timestamps
+      if (id == 0x01 && i + 10 <= bnoLen) {
+        int16_t x = bnoBuf[i + 4] | (bnoBuf[i + 5] << 8);
+        int16_t y = bnoBuf[i + 6] | (bnoBuf[i + 7] << 8);
+        int16_t z = bnoBuf[i + 8] | (bnoBuf[i + 9] << 8);
+        accIn(x / 256.0f, y / 256.0f, z / 256.0f);
+        bnoLastAccMs = now;
+        i += 10;
+        continue;
+      }
+      break;                               // a report we did not ask for
+    }
+  }
+}
+
+// Once a second: the last minute's 7 movement features, for the detector task.
+// Needs half a minute of fresh samples; otherwise there are none, and the
+// detector scores the heart rate alone.
+void accFeatPoll() {
+  static uint32_t last = 0;
+  uint32_t now = millis();
+  if (now - last < 1000) return;
+  last = now;
+  if (!bnoOk || now - bnoLastAccMs > 2000 || accWinN < BD_ACC_MIN) {
+    portENTER_CRITICAL(&accFeatMux);
+    accFeatMs = 0;
+    portEXIT_CRITICAL(&accFeatMux);
+    return;
+  }
+  uint16_t first = (accWinHead + BD_ACC_WIN - accWinN) % BD_ACC_WIN;
+  for (uint16_t i = 0; i < accWinN; i++)
+    memcpy(accLin[i], accWin[(first + i) % BD_ACC_WIN], sizeof(accLin[0]));
+  float f[BD_ACC_NF];
+  bd_acc_features(accLin, accWinN, f);
+  portENTER_CRITICAL(&accFeatMux);
+  memcpy(accFeat, f, sizeof(f));
+  accFeatMs = now ? now : 1;
+  portEXIT_CRITICAL(&accFeatMux);
+}
+
+// Before deep sleep: tell the hub to sleep, and hold its reset line high so a
+// floating pin cannot wake it back up.
+void bnoSleep() {
+  if (bnoOk) {
+    uint8_t cmd = 3;                       // executable channel: 3 = sleep
+    bnoSend(1, &cmd, 1);
+  }
+  digitalWrite(BNO_RST, HIGH);
+  gpio_hold_en((gpio_num_t)BNO_RST);
+  gpio_deep_sleep_hold_en();
 }
 
 // =====================================================
@@ -1478,6 +1754,12 @@ void webBegin() {
                   " finger=" + String(fingerDetected() ? 1 : 0) +
                   " fst=" + String(fingerStateNow()) +
                   " bpm=" + String(bpmValid ? bpmLive : 0) +
+                  // the accelerometer: answering?, samples so far, motion 0..1
+                  " imu=" + String(bnoOk ? (millis() - bnoLastAccMs < 2000 ? "on" : "quiet") : "off") +
+                  " accn=" + String(accTotal) +
+                  " mot=" + String(accMotion(), 3) +
+                  " imur=" + String(bnoResets) +
+                  " imuhz=" + String(accRate, 1) +
                   // conditioning + websocket diagnostics: which link is dead?
                   " cond=" + String(condTotal) +
                   " head=" + String(condHead) +
@@ -1495,6 +1777,7 @@ void webBegin() {
                   " dsc=" + String(bdScore, 3) +
                   " dlv=" + String(bdLevel < 0 ? -1 : (int)(bdLevel * 100.0f + 0.5f)) +
                   " dms=" + String(bdMs) +
+                  " dmode=" + String(bdMode ? "motion" : "hr") +
                   " dhold=" + String(bdHolds) +
                   " ddrop=" + String(bdDropped) +
                   " self=" + String(bdReady ? "pass" : (strncmp(bdSelf, "off", 3) == 0 ? "off" : "fail")) +
@@ -1528,6 +1811,7 @@ void webBegin() {
           float sv = atof(v + 1);
           if (sv >= 0.0f && sv <= 1.0f) {
             hostSens = sv;
+            sensChangedMs = millis() | 1;   // the main loop saves it to NVS
             // The board used to derive the line itself, back when it was a pure
             // function of the slider. It is not any more: the threshold is
             // k_sigma above the wearer's live calm, and only the master knows
@@ -1583,6 +1867,7 @@ void wsTick() {
   wsTicks++;
   if (!webStarted || ws.count() == 0) {
     condTail = condHead;                  // nobody listening, do not accumulate
+    accTail = accHead;
     return;
   }
   if (millis() - lastSend < WS_PERIOD_MS) {
@@ -1649,18 +1934,35 @@ void wsTick() {
   if (bdReady && bl >= 0.0f) snprintf(ondLevel, sizeof(ondLevel), "%.3f", bl);
   else snprintf(ondLevel, sizeof(ondLevel), "null");
 
+  // the accelerometer samples since the last frame, [x,y,z] in 1/64 g at 32 Hz
+  // (~4 a frame; capped so a stalled link cannot overflow the frame), and the
+  // 0..1 motion figure. null and [] when the IMU is not answering.
+  char acc[200];
+  int na = 0, ka = 0;
+  while (accTail != accHead && ka < 10 && na < (int)sizeof(acc) - 24) {
+    na += snprintf(acc + na, sizeof(acc) - na, ka ? ",[%d,%d,%d]" : "[%d,%d,%d]",
+                   accRing[accTail][0], accRing[accTail][1], accRing[accTail][2]);
+    accTail = (accTail + 1) % ACC_CAP;
+    ka++;
+  }
+  acc[na] = 0;
+  float mot = accMotion();
+  char motStr[12];
+  if (mot >= 0.0f) snprintf(motStr, sizeof(motStr), "%.3f", mot);
+  else snprintf(motStr, sizeof(motStr), "null");
+
   // idx caps at ~208 chars and bvp at ~448, plus ~290 of scaffolding once
-  // state and warm_s are in it, plus ~90 for src and the on-device block.
-  // 1024 left barely 70 bytes of headroom and a truncated frame is invalid
-  // JSON the dashboard silently drops.
-  char frame[1400];
+  // state and warm_s are in it, plus ~90 for src and the on-device block, plus
+  // up to ~200 of accelerometer. a truncated frame is invalid JSON the
+  // dashboard silently drops, so keep real headroom.
+  char frame[1700];
   snprintf(frame, sizeof(frame),
            "{\"type\":\"f\",\"running\":true,\"elapsed\":%.1f,\"buf\":%lu,\"win\":%d,"
            "\"idx\":[%s],\"bvp\":[%s],\"level\":%s,\"flag\":%s,\"score\":0,"
            "\"bpm\":%s,\"spo2\":%s,\"quality\":null,\"label\":\"-\",\"sens\":%.3f,"
            "\"thr_level\":%.3f,\"state\":\"%s\",\"warm_s\":%ld,"
-           "\"subject\":\"%s\",\"src\":\"%s\","
-           "\"ond\":{\"st\":\"%s\",\"l\":%s,\"f\":%d,\"s\":%.4f,\"ms\":%lu},"
+           "\"subject\":\"%s\",\"src\":\"%s\",\"motion\":%s,\"acc\":[%s],"
+           "\"ond\":{\"st\":\"%s\",\"l\":%s,\"f\":%d,\"s\":%.4f,\"ms\":%lu,\"m\":\"%s\"},"
            "\"device\":{\"connected\":true,\"port\":\"esp32\",\"contact\":%s,\"dropped\":%lu,"
            "\"finger\":{\"st\":\"%s\",\"n\":%d,\"of\":%d,\"keep\":%ld}}}",
            condTotal / (float)COND_FS, (unsigned long)buffered, COND_FS * 60,
@@ -1674,9 +1976,9 @@ void wsTick() {
            // answering, their reason for having no verdict is worth reporting
            (v.fresh ? v.state : "stale"), (long)v.wait,
            hostSubject[0] ? hostSubject : devId.c_str(),
-           v.src,
+           v.src, motStr, acc,
            BD_ST_NAME[bdStateId], ondLevel, (int)bdFlag, (double)bdScore,
-           (unsigned long)bdMs,
+           (unsigned long)bdMs, bdMode ? "motion" : "hr",
            finger ? "true" : "false",
            (unsigned long)condDropped,
            fSt, fN, fOf, fKeep);
@@ -1732,6 +2034,24 @@ void wearerPoll() {
     prefs.putString("wearer", hostSubject);
   }
   prefs.end();
+}
+
+void sensPoll() {
+  uint32_t t = sensChangedMs;
+  if (t == 0 || millis() - t < SENS_SAVE_MS) return;
+  sensChangedMs = 0;
+  prefs.begin("ui", false);
+  if (fabsf(prefs.getFloat("sens", -1.0f) - hostSens) > 0.0005f) {
+    prefs.putFloat("sens", hostSens);
+  }
+  prefs.end();
+}
+
+void sensLoad() {
+  prefs.begin("ui", true);
+  float v = prefs.getFloat("sens", 0.5f);
+  prefs.end();
+  hostSens = (v >= 0.0f && v <= 1.0f) ? v : 0.5f;
 }
 
 void wearerLoad() {
@@ -2143,6 +2463,8 @@ void readInitialSamples() {
       pollHostSerial();
       s1Poll();
       statusLedPoll();
+      bnoPoll();
+      accFeatPoll();
       irDcDisplay = (irDcDisplay == 0) ? ir : (irDcDisplay * 15 + ir) / 16;
       condFeed(timestamp, ir, red);
       if ((statSamples & 0xFF) == 0 || wifiPend != 0) wifiPoll();
@@ -2219,6 +2541,7 @@ void s1Sleep() {
   // biggest draw on this board -- shutDown() takes it to ~0.7 uA. On a 150 mAh
   // cell that is the difference between days and hours.
   particleSensor.shutDown();
+  bnoSleep();
   ledcWrite(STATUS_LED_PIN, 0);
   server.end();
   WiFi.disconnect(true);
@@ -2322,6 +2645,7 @@ void setup() {
 
   // Start I2C for MAX30102
   wearerLoad();                  // the last wearer, until the master says otherwise
+  sensLoad();                    // and the last slider position, likewise
   wifiLoad();
   wifiConnect();
   wifiShowStatus();
@@ -2357,6 +2681,10 @@ void setup() {
   // 100-150k with headroom. If IR still reads >240,000 with a finger on, drop it
   // further; if it reads <50,000, raise it.
   sensorConfigure();
+
+  // The accelerometer, on the same bus. Before sampling starts: bringing it up
+  // waits ~0.6 s for it to announce itself.
+  bnoBegin();
 
   // The on-device detector: allocate in PSRAM, prove the C++ against the
   // Python reference, then start scoring. Refuses to run if either fails.
@@ -2404,6 +2732,8 @@ void loop() {
       pollHostSerial();
       s1Poll();
       statusLedPoll();
+      bnoPoll();
+      accFeatPoll();
       irDcDisplay = (irDcDisplay == 0) ? ir : (irDcDisplay * 15 + ir) / 16;
       condFeed(timestamp, ir, red);
       if ((statSamples & 0xFF) == 0 || wifiPend != 0) wifiPoll();
