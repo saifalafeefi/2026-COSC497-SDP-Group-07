@@ -390,7 +390,6 @@ lives there. without it the board still does everything else and reports
 
 ```
 http://<board-ip>/          Pulse Watch
-http://<board-ip>/dev       developer dashboard
 http://<board-ip>/health    plain text diagnostics -- try this FIRST
 ```
 

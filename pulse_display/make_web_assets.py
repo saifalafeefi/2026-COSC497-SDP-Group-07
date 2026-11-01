@@ -11,7 +11,7 @@ PROGMEM arrays, served with Content-Encoding: gzip.
 
 why embed rather than use LittleFS: no filesystem partition, no upload plugin,
 and the assets can never drift out of sync with the firmware that serves them.
-they are ~65 KB gzipped, which is nothing against 16 MB of flash.
+they are ~80 KB gzipped, which is nothing against 8 MB of flash.
 """
 from __future__ import annotations
 
@@ -27,12 +27,10 @@ SKETCHES = [os.path.join(ROOT, n) for n in ("pulse_display", "pulse_headless")]
 ASSETS = [
     ("/",                 "pulse/Pulse Watch.dc.html",      "text/html",              "watch_html"),
     ("/support.js",       "pulse/support.js",               "application/javascript", "support_js"),
-    ("/dev",              "anomaly/static/index.html",      "text/html",              "dev_html"),
-    ("/vendor/uPlot.iife.min.js",
-     "pipeline/static/vendor/uPlot.iife.min.js", "application/javascript", "uplot_js"),
-    ("/vendor/uPlot.min.css",
-     "pipeline/static/vendor/uPlot.min.css",     "text/css",               "uplot_css"),
 ]
+# /dev (anomaly/static/index.html) and its uPlot are NOT baked in: that page
+# scores the flag against WESAD's labels, and a real wearer has none. it lives
+# on in `anomaly.serve`'s WESAD demo at :8001/dev.
 
 
 def c_array(name: str, blob: bytes) -> str:

@@ -109,6 +109,21 @@ struct Verdict {
 #define S1_HOLD_MS     2000
 #define S1_DEBOUNCE_MS 40
 
+// =====================================================
+// D1, the green status LED
+// =====================================================
+// GPIO2 -> D1 anode, cathode -> R1 820R -> GND (Rev F netlist): high = on,
+// ~1.6 mA. The red LED beside it is the charger's STAT line on VBUS -- pure
+// hardware, the ESP32 can neither read nor drive it, and no pin sees the
+// battery, so this one shows the board's state, not its charge.
+//   off         no finger
+//   blip / 1 s  checking the finger, after a full second passed the blood test
+//   solid       finger on, calm or warming up
+//   fast blink  finger on and flagged (master's verdict or the board's own)
+// Full drive is glaring, so it runs on PWM at STATUS_LED_DUTY / 255.
+#define STATUS_LED_PIN  2
+#define STATUS_LED_DUTY 6
+
 // MAX30102 object
 MAX30105 particleSensor;
 
@@ -857,6 +872,36 @@ void drawStatus() {
   // set for the rest of the run after a single dashboard demo.
   bool demo = (hostDemo != 0 && (millis() - hostDemoMs) < DEMO_TTL);
   if (!demo) hostDemo = 0;
+}
+
+// D1's pattern, from the same finger state and verdict the dashboards get.
+// Re-read every 50 ms and only written on a change, so it is cheap enough to
+// sit in the sample loop beside s1Poll().
+void statusLedPoll() {
+  static uint32_t lastMs = 0;
+  static int8_t lit = -1;
+  uint32_t now = millis();
+  if (now - lastMs < 50) return;
+  lastMs = now;
+
+  int n, of;
+  long keep;
+  const char *st = fingerState(&n, &of, &keep);
+  bool on;
+  if (strcmp(st, "on") == 0) {
+    on = verdictNow().flag == 1 ? (now % 250) < 125 : true;
+  } else if (strcmp(st, "check") == 0 && n >= 1) {
+    // not "unsteady", and not before one whole passing second: an empty
+    // sensor's noise and room-light flicker cross the pulse line for an
+    // instant now and then, and blinked the LED with nothing on it
+    on = (now % 1000) < 100;
+  } else {
+    on = false;
+  }
+  if ((int8_t)on != lit) {
+    lit = on;
+    ledcWrite(STATUS_LED_PIN, on ? STATUS_LED_DUTY : 0);
+  }
 }
 
 // =====================================================
@@ -2097,6 +2142,7 @@ void readInitialSamples() {
       streamSample(timestamp, ir, red);
       pollHostSerial();
       s1Poll();
+      statusLedPoll();
       irDcDisplay = (irDcDisplay == 0) ? ir : (irDcDisplay * 15 + ir) / 16;
       condFeed(timestamp, ir, red);
       if ((statSamples & 0xFF) == 0 || wifiPend != 0) wifiPoll();
@@ -2173,6 +2219,7 @@ void s1Sleep() {
   // biggest draw on this board -- shutDown() takes it to ~0.7 uA. On a 150 mAh
   // cell that is the difference between days and hours.
   particleSensor.shutDown();
+  ledcWrite(STATUS_LED_PIN, 0);
   server.end();
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
@@ -2269,6 +2316,8 @@ void setup() {
 
   streamBanner();
   rgbOff();                      // whatever an earlier firmware left on the RGB LED
+  ledcAttach(STATUS_LED_PIN, 5000, 8);
+  ledcWrite(STATUS_LED_PIN, 0);
   s1Begin();                     // the power button, and why we are awake
 
   // Start I2C for MAX30102
@@ -2354,6 +2403,7 @@ void loop() {
       streamSample(timestamp, ir, red);
       pollHostSerial();
       s1Poll();
+      statusLedPoll();
       irDcDisplay = (irDcDisplay == 0) ? ir : (irDcDisplay * 15 + ir) / 16;
       condFeed(timestamp, ir, red);
       if ((statSamples & 0xFF) == 0 || wifiPend != 0) wifiPoll();

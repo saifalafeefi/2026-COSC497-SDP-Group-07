@@ -192,26 +192,25 @@ function ensureCharts(){
       {stroke:"#c0392b",width:1,dash:[6,4],points:{show:false}}],200,[0,1],               // threshold
       "time (s)","anomaly level (0–1)"),[[0],[0],[0],[0]],l);
 }
-let refPtp=0;                 // amplitude of a real pulse, for a stable y-axis
+let refHalf=0, refSeen=false; // half-height of a real pulse, for a stable y-axis
 function drawBvp(){
   if(!bvpChart) return;
+  bvpChart.setData([bvp.t,bvp.y]);
   // uPlot autoscales y to the visible data. with no finger that stretches a ~30 a.u.
   // noise floor to fill the same panel as a ~765 a.u. pulse, which reads as a
-  // perfectly convincing heartbeat. hold the scale at the last real pulse instead:
-  // noise then draws as the flat line it is. tracks only while contact is good, and
-  // decays slowly so a genuinely weaker pulse still adapts.
-  const y=bvp.y;
-  if(y.length>2){
+  // perfectly convincing heartbeat; and one spike held the whole panel's scale until
+  // it scrolled off. size it from the last 3 s instead (older spikes clip at the
+  // edge), and with no contact keep the last real pulse's size, so noise draws flat.
+  const y=bvp.y, n=y.length;
+  if(n>2){
     let mn=Infinity,mx=-Infinity;
-    for(const v of y){ if(v<mn)mn=v; if(v>mx)mx=v; }
-    const ptp=mx-mn;
-    if(!noContactNow && ptp>1) refPtp = refPtp ? Math.max(refPtp*0.995, ptp) : ptp;
-    if(refPtp && refPtp>ptp){
-      const mid=(mn+mx)/2;
-      bvpChart.setScale("y",{min:mid-refPtp/2, max:mid+refPtp/2});
-    }
+    for(let i=Math.max(0,n-3*FS);i<n;i++){ const v=y[i]; if(v<mn)mn=v; if(v>mx)mx=v; }
+    const half=Math.max(0.5,(mx-mn)/2*1.1);
+    if(!noContactNow){ refHalf=half; refSeen=true; }
+    else if(!refSeen) refHalf=Math.max(half,400);   // no pulse seen yet: pulse-sized floor
+    const mid=(mn+mx)/2;
+    bvpChart.setScale("y",{min:mid-refHalf, max:mid+refHalf});
   }
-  bvpChart.setData([bvp.t,bvp.y]);
 }
 function drawHr(){ if(hrChart) hrChart.setData([hr.t,hr.y]); }
 function drawLev(){ if(levChart) levChart.setData([lev.t,lev.g,lev.y,lev.t.map(()=>THR)]); }

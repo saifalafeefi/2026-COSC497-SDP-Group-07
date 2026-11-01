@@ -134,6 +134,14 @@ For the Rev F wearable the module is an **ESP32-S3-WROOM-1-N8R8** (marking
 (64Mb)` with `Partition Scheme: 8M with spiffs (3MB APP/1.5MB SPIFFS)` or
 `default_8MB`, and keep `PSRAM: OPI PSRAM` — the detector still needs it.
 
+**Rev F LEDs.** the red LED is the charger's (MCP73831 STAT, on VBUS): on while
+charging, off when full or unplugged. the ESP32 can't read or drive it, and no
+pin sees the battery, so the firmware can't report charge — that needs a
+resistor divider from BatP to a spare ADC pin (GPIO3 is free). the green LED
+(D1) is on **GPIO2** and `pulse_headless` drives it as a status light: off = no
+finger, short blip each second = checking the finger, solid = finger on, fast
+blink = flagged.
+
 ---
 
 ## Gotchas that cost real time
@@ -218,8 +226,9 @@ Already fixed — do not re-diagnose these:
   the cheap path: no TFLM, no arena sizing, and that gap *is* the "accuracy cost"
   the DoD asks to be reported.
 - **No accelerometer** on the rig.
-- `/dev` still shows WESAD-only panels (ground truth, agreement) that are
-  meaningless on this hardware.
+- `/dev` is no longer baked into the board (it scores against WESAD labels a
+  wearer doesn't have); under `serve --source device` it still shows those
+  empty WESAD-only panels.
 - Signal-quality index not ported to C, so frames report `quality: null`.
 - The fleet is untested with more than one board (only one exists).
 - A 60 s refill after removing a finger is unavoidable: 3840 samples is the

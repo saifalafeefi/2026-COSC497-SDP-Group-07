@@ -158,7 +158,8 @@ built on the device path already (`anomaly/device_source.py`, `anomaly/device_ch
       master's roster, and the board keeps only its last 5 flags
 - [x] Calibrate is a real backend session (progress, gate, commit) instead of a mock ramp
 - [x] the dashboard is served by the ESP32 over WiFi; the browser never touches the PC
-- [ ] strip `/dev` of its WESAD-only panels (ground truth, agreement) — meaningless on our hardware
+- [x] `/dev` taken off the board — its WESAD-only panels (ground truth, agreement) are meaningless there; it stays in the WESAD demo
+- [ ] hide those panels under `serve --source device` too
 - [ ] remove Pulse Watch's mock-replay fallback, which shows fabricated data when the socket is slow
 - [x] with no finger on the sensor: HR, SpO₂, quality, level and flag blank instead of
       reporting noise, and the waveform holds its scale so noise draws flat

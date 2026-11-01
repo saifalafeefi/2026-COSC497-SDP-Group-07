@@ -1070,23 +1070,33 @@ class Component extends DCLogic {
     const padL=34;
     ctx.strokeStyle='#F1F5F9'; ctx.lineWidth=1; for(let i=1;i<4;i++){ const y=Math.round(h*i/4)+.5; ctx.beginPath(); ctx.moveTo(padL,y); ctx.lineTo(w,y); ctx.stroke(); }
     const d=this.wave, n=d.length; if(n<2) return;
-    let mn=Infinity,mx=-Infinity; for(const v of d){ if(v<mn)mn=v; if(v>mx)mx=v; } if(mx-mn<0.01){mx=mn+1;}
-    // Lock the vertical scale to the amplitude of a REAL pulse. Autoscaling every
-    // frame stretched the no-finger noise floor (~30 a.u.) to fill the same panel
-    // as an actual pulse (~765 a.u.), so noise looked exactly like a heartbeat.
-    // The reference only tracks while contact is good, and decays slowly so a
-    // genuinely weaker pulse still adapts; with the finger off it is frozen, and
-    // the noise renders as the flat line it really is.
-    const liveOk = (ss!=='noContact' && ss!=='offline' && ss!=='paused');
-    const ptp = mx-mn;
-    if(liveOk && ptp>1){ this.refPtp = this.refPtp ? Math.max(this.refPtp*0.999, ptp) : ptp; }
-    if(this.refPtp && this.refPtp > ptp){
-      const mid=(mn+mx)/2; mn=mid-this.refPtp/2; mx=mid+this.refPtp/2;
-    }
-    const pad=12, ph=h-pad*2; const X=i=>padL+(i/959)*(w-padL); const Y=v=>pad+ph-((v-mn)/(mx-mn))*ph; const s=960-n;
-    // y-axis amplitude ticks (BVP signal level)
+    // The vertical scale follows the last 3 s only, eased over ~0.25 s. Sizing it
+    // from the whole 15 s panel kept a spike's stretch until the spike scrolled
+    // off, and the old 0.1%-a-frame decay then took ~35 s more to come back; now
+    // an older spike is clipped at the edge and the pulse refills the panel as
+    // soon as it is steady again. With the finger off the size is frozen at the
+    // last real pulse, so the no-finger noise floor (~30 a.u. vs ~765 for a
+    // pulse) draws as the flat line it is instead of a convincing heartbeat.
+    // Only a confirmed finger sizes it: noPulse / checking / unsteady are the
+    // sensor's noise too. Before any real pulse has been seen (a fresh load with
+    // no finger), a live board's scale starts at a pulse-sized floor.
+    const liveOk = !['noContact','offline','paused','noPulse','checking','unsteady'].includes(ss);
+    const tail=Math.min(n,192); let rmn=Infinity,rmx=-Infinity;
+    for(let i=n-tail;i<n;i++){ const v=d[i]; if(v<rmn)rmn=v; if(v>rmx)rmx=v; }
+    const tMid=(rmn+rmx)/2, tHalf=Math.max(0.5,(rmx-rmn)/2*1.1);
+    const now=performance.now(), dt=this.yT?Math.min(1,(now-this.yT)/1000):1; this.yT=now;
+    const a=1-Math.exp(-dt/0.25);
+    if(liveOk) this.yRef=true;
+    const goal = (liveOk || !this.yRef) ? (this.yRef ? tHalf : Math.max(tHalf, this.state.useLive ? 400 : 0)) : this.yHalf;
+    if(!this.yHalf){ this.yMid=tMid; this.yHalf=goal; }
+    else { this.yMid+=(tMid-this.yMid)*a; this.yHalf+=(goal-this.yHalf)*a; }
+    const mn=this.yMid-this.yHalf, mx=this.yMid+this.yHalf;
+    const pad=12, ph=h-pad*2; const X=i=>padL+(i/959)*(w-padL); const Y=v=>pad+ph-((Math.max(mn,Math.min(mx,v))-mn)/(mx-mn))*ph; const s=960-n;
+    // y-axis amplitude ticks (BVP signal level), rounded to the scale's own
+    // resolution so they don't tick by a unit every beat
     ctx.fillStyle='#9AA6B2'; ctx.font='9px Plus Jakarta Sans, sans-serif'; ctx.textAlign='right'; ctx.textBaseline='middle';
-    [mx,(mn+mx)/2,mn].forEach(v=>{ ctx.fillText(Math.round(v), padL-5, Y(v)); });
+    const q=Math.pow(10,Math.floor(Math.log10(Math.max(1,mx-mn)))-1);
+    [mx,(mn+mx)/2,mn].forEach(v=>{ ctx.fillText(Math.round(Math.round(v/q)*q), padL-5, Y(v)); });
     ctx.textBaseline='alphabetic';
     const g=ctx.createLinearGradient(0,0,0,h); g.addColorStop(0,'rgba('+rgb+',.18)'); g.addColorStop(1,'rgba('+rgb+',0)');
     ctx.beginPath(); ctx.moveTo(X(s),Y(d[0])); for(let i=1;i<n;i++) ctx.lineTo(X(s+i),Y(d[i])); ctx.lineTo(X(959),h); ctx.lineTo(X(s),h); ctx.closePath(); ctx.fillStyle=g; ctx.fill();
