@@ -24,6 +24,7 @@ built on WESAD, evaluated with sensitivity-first, subject-wise metrics.
 | `export.py` | ✅ | train one deployable autoencoder on all calm data → `saved/` |
 | `infer.py` | ✅ | load the saved model → score / level / flag one live window |
 | `serve.py` + `static/` | ✅ | **live dashboards**: dev view (`/`, model-vs-truth scorecard) + Pulse Watch (`/watch`) on one `/ws` |
+| `virtual_board.py` | ✅ | **a WESAD subject as a board**: speaks the ESP32's `/health` + `/ws` + `/flag`, so `fleet.py` runs a whole roster with no hardware |
 | `make_plots.py` | ✅ | regenerate the result figures (`fig1/2/3_*.png`) |
 
 ## run it
@@ -125,4 +126,4 @@ the model still flags on the learned pulse *shape*, not on a heart-rate threshol
 ./run anomaly/wesad.py S2 --win 60 --step 5
 ```
 
-(WESAD itself is ~17 GB and gitignored — see the top-level README for the layout.)
+(WESAD itself is ~17 GB and gitignored. it is a direct download — `COMMANDS-macos.md` section 1 has the one-line `curl` for it — and unzips straight into `WESAD/`.)

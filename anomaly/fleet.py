@@ -47,7 +47,7 @@ from . import quality
 from .db import DEFAULT_PATH as DB_PATH, Db, import_legacy_scorers
 from .infer import SAVE_DIR
 from .protocol import DEFAULT_PLAN, ProtocolRun
-from .wesad import FS, FS_ACC as ACC_FS
+from .wesad import FS, FS_ACC as ACC_FS, SUBJECTS as WESAD_SUBJECTS
 
 WIN = 60 * FS
 
@@ -867,6 +867,8 @@ class Fleet:
                 if dev_id in self.devices:
                     self.devices[dev_id].ip = ip      # DHCP may have moved it
                     continue
+                if info.get("demo") == "1" and info.get("wesad"):
+                    self.adopt_demo_subject(dev_id, info["wesad"])
                 dev = Device(dev_id, ip, self.det, self.db)
                 self.devices[dev_id] = dev
                 why = ("" if dev.scoring else
@@ -877,6 +879,38 @@ class Fleet:
         finally:
             self.scanning = False
             self.last_scan = time.monotonic()
+
+    def adopt_demo_subject(self, dev_id: str, subject_code: str):
+        """a replayed WESAD board arrives already knowing whose data it is.
+
+        a real board has to be assigned a wearer by hand, because only the
+        person holding it knows who they are. a board from
+        `anomaly.virtual_board` IS a named subject from a public dataset, and
+        making somebody click through an assignment before the demo scores
+        anything hides what the demo is there to show.
+
+        first sight only -- taking a demo board off its subject in the roster
+        has to stick, not be undone by the next rescan 30 s later.
+
+        the code has to be one of the released WESAD subjects: this arrives in
+        a /health line, which is whatever answered that address, and it ends up
+        as a row in the store.
+        """
+        if subject_code not in WESAD_SUBJECTS:
+            print(f"  {dev_id}: ignoring wesad={subject_code!r} — not a released subject",
+                  flush=True)
+            return
+        code = "WESAD %s" % subject_code
+        row = self.db.subject_by_code(code)
+        if row is None:
+            sid = self.db.create_subject(code, "", "replayed WESAD subject (demo)")
+            print(f"  subject {code} created", flush=True)
+        else:
+            sid = row["id"]
+        cur = self.db.assigned_subject(dev_id)
+        if cur is None or cur["id"] != sid:
+            self.db.assign_subject(dev_id, sid)
+            print(f"  {dev_id}: now worn by {code}", flush=True)
 
     async def housekeeping_loop(self, every: float = 30.0):
         """close sessions nobody is in any more.

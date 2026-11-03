@@ -207,7 +207,9 @@ folder (iCloud/OneDrive); a 1.7 GB venv under synced `~/Documents` made
 
 ## data
 
-- **public (develop & benchmark):** [WESAD](https://archive.ics.uci.edu/dataset/465/wesad+wearable+stress+and+affect+detection),
+- **public (develop & benchmark):** [WESAD](https://archive.ics.uci.edu/dataset/465/wesad+wearable+stress+and+affect+detection)
+  ([direct download](https://uni-siegen.sciebo.de/s/HGdUkoNlW1Ub0Gx/download), 2.1 GB zipped,
+  no registration — unzips into `WESAD/`),
   PPG-DaLiA, PhysioNet — clean signal, enough subjects for honest splits. not committed (gitignored).
 - **our own (test the transfer claim):** modest induced-proxy sessions
   (baseline → induction → recovery), 10–15 consenting volunteers, timestamped.
@@ -230,6 +232,7 @@ anomaly/                             one-class anomaly detector (current directi
   compress.py                        TFLite int8 + compression cost (O7)
   export.py / infer.py               train+save / load the deployable model
   serve.py + static/                 live dashboard (FastAPI + WebSocket + uPlot)
+  virtual_board.py                   WESAD subjects as boards — the fleet demo with no hardware
   device_source.py                   ESP32-S3 + MAX30102 serial reader → band-pass → 64 Hz
   device_check.py                    grip coach + the shared signal-quality gate
   device_calibrate.py                record our own calm, re-derive the flag threshold (O6)

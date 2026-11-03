@@ -61,6 +61,13 @@ CONFIG = os.path.join(os.path.expanduser("~"), ".pulse_control.json")
 FLEET = "http://localhost:8002"
 SERVE = "http://localhost:8001"
 
+# the 15 released WESAD subjects, mirroring anomaly/wesad.py (no S1, no S12).
+# hardcoded rather than imported: this app has to open and explain itself even
+# when the virtualenv it drives is missing or broken.
+WESAD_SUBJECTS = ["S%d" % i for i in range(2, 18) if i not in (1, 12)]
+NO_SUBJECT = "— none —"
+VBOARD_PORT = 8101              # anomaly.virtual_board's first port, one per board
+
 # what the OS calls its own hotspot, and what the buttons that drive it can
 # promise. `anomaly.hotspot` is the module behind both; only the words differ.
 if MAC:
@@ -256,6 +263,7 @@ class App:
         self.jobs: dict[str, Job] = {}
         self.gated: list = []                 # (widget, predicate) re-evaluated twice a second
         self.devices: list = []
+        self.roster_when_up = False          # open it as soon as the master answers
         self.hotspot = "checking…"
         self.tokens: dict = {}                # role -> token, from a --secure master's output
         self._tokbuf = ""
@@ -584,17 +592,50 @@ class App:
         self._btn(row, "Open plots folder", lambda: self.open_path("data", "protocols"))
 
     def _tab_demo(self, f):
-        row = self._section(f, "Demo without hardware",
-                            "Replays real WESAD stress data through the deployed model. This is the "
-                            "one to show when somebody asks whether any of it is real.")
-        self._btn(row, "▶  Start WESAD demo", lambda: self.run(
-            "serve", "WESAD demo dashboard", ["-m", "anomaly.serve"],
-            on_start=lambda: self.root.after(6000, lambda: webbrowser.open(SERVE))),
-            when=lambda: self.ready() and not self.is_running("serve"), big=True)
+        row = self._section(f, "Whose recording to replay",
+                            "All 15 released WESAD subjects are here, and every demo below runs on "
+                            "the ones picked. S5 separates calm from stress most cleanly under the "
+                            "deployed model; S17 and S7 are also good. Needs the dataset in WESAD/ "
+                            "— COMMANDS has the one-line download.")
+        form = ttk.Frame(row)
+        form.pack(side="left", anchor="w")
+        self.d_subj = tk.StringVar(value=self.cfg.get("demo_subject", "S5"))
+        ttk.Label(form, text="One dashboard").grid(row=0, column=0, sticky="w", padx=(0, 6))
+        ttk.Combobox(form, textvariable=self.d_subj, width=6, state="readonly",
+                     values=WESAD_SUBJECTS).grid(row=0, column=1, sticky="w")
+        saved = self.cfg.get("demo_fleet") or ["S5", "S10", NO_SUBJECT]
+        self.d_boards = []
+        ttk.Label(form, text="Fleet").grid(row=1, column=0, sticky="w", pady=(6, 0), padx=(0, 6))
+        for i in range(3):
+            v = tk.StringVar(value=saved[i] if i < len(saved) else NO_SUBJECT)
+            self.d_boards.append(v)
+            ttk.Combobox(form, textvariable=v, width=8, state="readonly",
+                         values=([NO_SUBJECT] + WESAD_SUBJECTS) if i else WESAD_SUBJECTS
+                         ).grid(row=1, column=1 + i, sticky="w", pady=(6, 0), padx=(0, 6))
+
+        row = self._section(f, "One dashboard, no hardware",
+                            "The product UI and the developer view, scoring the subject above "
+                            "against WESAD's own labels. This is the one to show when somebody "
+                            "asks whether any of it is real.")
+        self._btn(row, "▶  Start WESAD demo", self.start_demo,
+                  when=lambda: self.ready() and not self.is_running("serve"), big=True)
         self._btn(row, "■  Stop demo", lambda: self.stop("serve"), when=lambda: self.is_running("serve"))
         self._btn(row, "Open Pulse Watch", lambda: webbrowser.open(SERVE), when=lambda: self.is_running("serve"))
         self._btn(row, "Open developer view", lambda: webbrowser.open(SERVE + "/dev"),
                   when=lambda: self.is_running("serve"))
+
+        row = self._section(f, "The whole fleet, no hardware",
+                            "Replays each subject above as its own board on this machine — it "
+                            "answers /health and streams 64 Hz over a websocket exactly as an "
+                            "ESP32 does — then starts the real master on them. You get the roster, "
+                            "live verdicts, sessions and flags with nothing plugged in. Takes about "
+                            "a minute to come up (TensorFlow, then one subject at a time).")
+        self._btn(row, "▶  Start fleet demo", self.start_fleet_demo,
+                  when=lambda: self.ready() and not self.is_running("vboards"), big=True)
+        self._btn(row, "■  Stop fleet demo", self.stop_fleet_demo,
+                  when=lambda: self.is_running("vboards") or self.is_running("fleet"))
+        self._btn(row, "Open the roster", self.open_roster,
+                  when=lambda: self.is_running("fleet"))
 
         row = self._section(f, "One board over USB", "The same dashboard on the real sensor, no WiFi needed.")
         self._btn(row, "▶  Start USB dashboard", lambda: self.run(
@@ -738,6 +779,57 @@ class App:
         if save:
             self.cfg["net_mode"] = self.net_mode.get()
             save_config(self.cfg)
+
+    def start_demo(self):
+        sub = self.d_subj.get()
+        self.cfg["demo_subject"] = sub
+        save_config(self.cfg)
+        self.run("serve", "WESAD demo dashboard — %s" % sub,
+                 ["-m", "anomaly.serve", "--subject", sub],
+                 on_start=lambda: self.root.after(6000, lambda: webbrowser.open(SERVE)))
+
+    def start_fleet_demo(self):
+        """the whole system with no boards: replayed subjects + the real master.
+
+        the master is the SAME one the Live tab starts, pointed at loopback
+        instead of the LAN -- a demo that ran its own cut-down roster would be
+        demoing something we do not ship.
+        """
+        subs = [v.get() for v in self.d_boards if v.get() and v.get() != NO_SUBJECT]
+        if not subs:
+            messagebox.showinfo(APP, "Pick at least one subject to replay.")
+            return
+        if len(set(subs)) != len(subs):
+            messagebox.showinfo(APP, "Give each board a different subject — one person "
+                                     "cannot wear two boards, and the store enforces it.")
+            return
+        if self.is_running("fleet"):
+            messagebox.showinfo(APP, "The master is already running. Stop it on the Live tab "
+                                     "first, so it can be started on the replayed boards.")
+            return
+        self.cfg["demo_fleet"] = [v.get() for v in self.d_boards]
+        save_config(self.cfg)
+        self.tokens, self._tokbuf = {}, ""    # new tokens every master start
+        self.run("vboards", "Virtual boards — %s" % ", ".join(subs),
+                 ["-m", "anomaly.virtual_board", "--subjects", ",".join(subs)])
+        if not self.is_running("vboards"):
+            return                            # run() has already said why
+        devs = []
+        for i in range(len(subs)):
+            devs += ["--device", "127.0.0.1:%d" % (VBOARD_PORT + i)]
+        # no --hotspot: the boards are on loopback. the LAN sweep still runs, so
+        # a real board on this network joins the same roster.
+        self.run("fleet", "Master (replayed WESAD)",
+                 ["-m", "anomaly.fleet"] + devs + (["--secure"] if self.secure.get() else []))
+        # the master loads TensorFlow before it serves anything, so opening the
+        # roster on a timer lands on a connection error. the poller already asks
+        # it for devices twice a second -- open it when it answers.
+        self.roster_when_up = True
+
+    def stop_fleet_demo(self):
+        self.roster_when_up = False       # stopped before it came up: do not open it later
+        self.stop("fleet")
+        self.stop("vboards")
 
     def start_master(self):
         self.tokens, self._tokbuf = {}, ""    # new tokens every start
@@ -1138,6 +1230,9 @@ class App:
                         except Exception:
                             pass
                 elif kind == "devices":
+                    if msg[1] is not None and self.roster_when_up:
+                        self.roster_when_up = False
+                        self.open_roster()
                     self._show_devices(msg[1])
                 elif kind == "hotspot":
                     self.hotspot = msg[1]

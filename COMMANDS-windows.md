@@ -20,6 +20,7 @@ once in PowerShell (a few minutes, about 1 GB):
 | I want to… | In the app | Or in a terminal |
 |---|---|---|
 | show the demo, no hardware | **Demo** → Start WESAD demo | `.\run.ps1 anomaly.serve` |
+| show the *fleet* demo, no hardware | **Demo** → Start fleet demo | `.\run.ps1 anomaly.virtual_board` |
 | run the real thing | **Live** → Start master | `.\run.ps1 anomaly.fleet` |
 | put a board on WiFi | **Board setup** → Connect board | `.\run.ps1 anomaly.device_wifi --hotspot` |
 | record a stress session | **Stress session** → Start | `.\run.ps1 anomaly.protocol run` |
@@ -97,6 +98,7 @@ is back to the system python, which is the usual reason it "stops working".
 | `anomaly.fleet` | **the demo** | find every board on the LAN, score them all, roster at :8002 |
 | `pulse_display/make_web_assets.py` | **required** | rebuild the board's web pages. after ANY dashboard edit, and on every fresh clone |
 | `anomaly.serve` | current | single-stream dashboard at :8001 — WESAD replay, or one board over USB |
+| `anomaly.virtual_board` | current | replays WESAD subjects as boards on :8101+, for a fleet demo with no hardware |
 | `anomaly.db` | current | inspect the store, take a backup |
 | `anomaly.device_wifi` | current | put a board on WiFi over USB, read back its IP. `--hotspot` = this PC's hotspot, no password |
 | `anomaly.hotspot` | current | the Windows Mobile Hotspot: state, or `--on` |
@@ -206,9 +208,38 @@ un-ticked it.)
 - only `anomaly.device_check` / `anomaly.device_source` run without TensorFlow
   (numpy + scipy + pyserial); everything else needs the full install.
 
-datasets are not in git and are only needed for build steps:
-WESAD (~17 GB) unzips into `WESAD/`; the UBC PPG set (~3.8 GB, old baseline
-only) into `Code & Data/` — [Borealis Data](https://borealisdata.ca/dataset.xhtml?persistentId=doi:10.5683/SP3/HF0OS9).
+datasets are not in git and are only needed for build steps.
+
+**WESAD is a direct download — no registration, no request form.** 2.1 GB
+zipped, 17.6 GB unzipped, 15 subjects. from the repo root, in PowerShell:
+
+```powershell
+curl.exe -L -C - -o "$env:USERPROFILE\Downloads\WESAD.zip" "https://uni-siegen.sciebo.de/s/HGdUkoNlW1Ub0Gx/download"
+tar -xf "$env:USERPROFILE\Downloads\WESAD.zip"
+Remove-Item "$env:USERPROFILE\Downloads\WESAD.zip"
+```
+
+the zip carries the dataset's own `WESAD\<subject>\` layout, so it unpacks
+straight into place and nothing needs configuring. check it landed with:
+
+```powershell
+.\run.ps1 anomaly\wesad.py S5
+```
+
+which prints that subject's window counts. notes:
+
+- `tar -xf` is the one that ships with Windows 10/11 and handles a zip this
+  size; `Expand-Archive` works too but takes several times as long.
+- `-C -` resumes a part-finished download rather than starting over; the share
+  is in Germany, so expect the better part of ten minutes.
+- only `S*.pkl` is ever read. the 268 MB `S*_respiban.txt` beside each one is
+  the 700 Hz chest recording this project deliberately ignores — deleting all
+  15 reclaims ~3.5 GB and breaks nothing.
+- the link is the file the [UCI dataset page](https://archive.ics.uci.edu/dataset/465/wesad+wearable+stress+and+affect+detection)
+  points at; if it ever moves, that page is where to look.
+
+the UBC PPG set (~3.8 GB, old baseline only) goes into `Code & Data\` —
+[Borealis Data](https://borealisdata.ca/dataset.xhtml?persistentId=doi:10.5683/SP3/HF0OS9).
 
 ---
 
@@ -374,6 +405,57 @@ injects an artifact — seconds of raised amplitude, like a real knock — and t
 detector holds its last verdict instead of flagging, which is the quality gate
 doing its job.
 
+**the whole fleet, with no hardware.** the three sources above are all one
+stream. `anomaly.virtual_board` replays WESAD subjects as *boards*: each one
+answers `http://<ip>/health` and streams 64 Hz BVP over a websocket exactly as
+an ESP32 does, so the real master discovers them, scores them with the same
+autoencoder, opens sessions in the store and pushes verdicts back. the roster,
+the live levels, the flags and the session history all work with nothing
+plugged in.
+
+```bash
+python -m anomaly.virtual_board --subjects S5,S10,S16     # 3 boards on :8101-8103
+python -m anomaly.fleet --device 127.0.0.1:8101 --device 127.0.0.1:8102 --device 127.0.0.1:8103
+```
+
+`virtual_board` prints that second line for you, with the right ports. in the
+app it is one button: **Demo** → pick the subjects → **Start fleet demo**.
+
+- a board advertises `demo=1 wesad=S5` on `/health`, and the master assigns it a
+  subject called `WESAD S5` on first sight — a real board has to be assigned a
+  wearer by hand, because only the person holding it knows who they are, but a
+  replay already knows whose data it is. take it off that subject in the roster
+  and it stays off.
+- one process hosts every subject, one port each, and loads them one at a time:
+  the pickles are ~1 GB. the ports open immediately and each board answers
+  `/health` with 503 until its own subject is in memory, so the master picks it
+  up on its next rescan rather than adopting a board that cannot stream yet.
+  budget about a minute for the whole thing to come up.
+- it replays 5 minutes of that subject's real **baseline** and 5 of their real
+  **stress**, on a loop. not 2+2: the master re-estimates the wearer's calm from
+  their own last ~3 minutes of scores, and on a 2+2 loop the stress phase lands
+  inside its own calm reference and the level never rises.
+- **what to expect, measured on S5 at the default sensitivity, uncalibrated**
+  (so the roster marks it ZERO-SHOT): ~90 s warming up, then a first minute or
+  so of `hold` while the 150 s history fills enough to back-fill dropped
+  seconds; level ~0.00 through the calm phase; the flag rises about 100 s into
+  the stress phase at level 1.00, holds ~2.5 min, and then **fades while the
+  subject is still stressed** — the reference is the last ~3 minutes, so the
+  flag reports a *change*, not an absolute state. it clears on its own and the
+  episode is one row in the session history. S10 over the same run peaked at
+  level 0.50 and never crossed the line; drag that board's sensitivity slider
+  in the roster if you want to see it flag.
+- it drops seconds as "movement" on this data — 10-50 s of a 60 s window early
+  on, settling to a few seconds once the history fills. that is the quality gate
+  reading the wrist sensor's amplitude swings; a contiguous, unstitched WESAD
+  baseline window does the same, so it is the gate meeting wrist PPG rather than
+  anything about the replay.
+- these boards report no accelerometer, so the master scores them on BVP alone,
+  exactly as it would a board with no IMU. no on-device detector either — their
+  `ond` block reads `demo` rather than pretending to run the C port.
+- it binds loopback. `--host 0.0.0.0` instead, to let a master on another
+  machine find them.
+
 ### 2.4 the single-stream dashboard
 
 separate from the fleet: one stream, one page, with a scorecard against ground
@@ -381,7 +463,9 @@ truth. run `serve` **or** `fleet`, not both.
 
 ```powershell
 python -m anomaly.serve                      # WESAD replay (default) -> :8001
-python -m anomaly.serve --subject S17        # other clean subjects: S17, S7
+python -m anomaly.serve --subject S17        # any of the 15 released subjects
+                                             # (S2-S17, no S1/S12; S5, S17, S7 are
+                                             #  the cleanest) -- or pick it in the app
 python -m anomaly.serve --source device      # a board over USB, auto-detect port
 python -m anomaly.serve --source device --device-port COM5
 ```
@@ -763,6 +847,7 @@ python -m anomaly.master --host 10.49.10.173
 | `anomaly\db.py` | the SQLite store behind the roster |
 | `anomaly\hotspot.py` | this machine's hotspot — Mobile Hotspot here, Internet Sharing on macOS |
 | `anomaly\serve.py` + `static\` | single-stream dashboards (`/` watch, `/dev`) |
+| `anomaly\virtual_board.py` | WESAD subjects as boards, for a fleet demo with no hardware |
 | `anomaly\saved\ae_int8.tflite` | the deployed model — dashboards and ESP32 both run this |
 | `anomaly\RESULTS.md` | PR-AUC, recall@90% spec, per-subject variance |
 | `run.ps1` · `run` | run anything without activating a venv (`.\run.ps1 doctor`) |
