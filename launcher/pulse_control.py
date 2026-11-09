@@ -460,6 +460,8 @@ class App:
                   when=lambda: self.is_running("fleet"))
         self._btn(row, "Open roster", self.open_roster,
                   when=lambda: self.is_running("fleet"))
+        self._btn(row, "Smoke test", self.smoke_test,
+                  when=lambda: self.is_running("fleet") and not self.is_running("smoke"))
         self._btn(row, "Copy admin token", lambda: self.copy_token("admin"),
                   when=lambda: self.is_running("fleet") and "admin" in self.tokens)
         self._btn(row, "Copy reviewer token", lambda: self.copy_token("reviewer"),
@@ -475,10 +477,14 @@ class App:
             self.tree.column(c, width=w, anchor="w")
         self.tree.pack(fill="x", pady=(4, 6))
         self.tree.bind("<<TreeviewSelect>>", self._board_picked)
+        # the wearer just pressed S1 on this board
+        self.tree.tag_configure("pressed", background="#1d4a63", foreground="#ffffff")
         row = ttk.Frame(f)
         row.pack(fill="x", anchor="w")
         self._btn(row, "Open board's dashboard", self.open_board, when=lambda: bool(self.tree.selection()))
         self._btn(row, "Board health check", self.board_health, when=lambda: bool(self.tree.selection()))
+        self._btn(row, "Identify (flash its LED)", self.identify_board,
+                  when=lambda: bool(self.tree.selection()) and self.is_running("fleet"))
         self.empty_lbl = ttk.Label(f, text="", style="Dim.TLabel")
         self.empty_lbl.pack(anchor="w", pady=(6, 0))
 
@@ -841,6 +847,13 @@ class App:
         else:
             self.run("fleet", "Master (shared WiFi%s)" % tag, ["-m", "anomaly.fleet"] + sec)
 
+    def smoke_test(self):
+        # read-only checks of the master and every board it sees; the reviewer
+        # token is enough on a secure master and goes in the env, not argv
+        tok = self.tokens.get("reviewer") or self.tokens.get("admin")
+        self.run("smoke", "Smoke test (master + boards)", ["-m", "anomaly.smoke"],
+                 env={"PULSE_TOKEN": tok} if tok else None)
+
     def _secure_changed(self):
         self.cfg["secure"] = self.secure.get()
         save_config(self.cfg)
@@ -1135,6 +1148,26 @@ class App:
         if d:
             webbrowser.open("http://%s/" % d["ip"])
 
+    def identify_board(self):
+        # through the master, the same as the roster's Identify button
+        d = self._selected_device()
+        if not d:
+            return
+        tok = self.tokens.get("admin") or self.tokens.get("reviewer")
+
+        def go():
+            try:
+                req = urllib.request.Request(FLEET + "/api/devices/%s/identify" % d["id"], data=b"{}",
+                                             method="POST",
+                                             headers=dict({"Content-Type": "application/json"},
+                                                          **({"X-Pulse-Token": tok} if tok else {})))
+                with urllib.request.urlopen(req, timeout=4) as r:
+                    r.read()
+                self.q.put(("out", "%s: LED flashing for 5 s\n" % (d.get("name") or d["id"])))
+            except Exception as e:
+                self.q.put(("out", "identify %s failed: %s\n" % (d["id"], e)))
+        threading.Thread(target=go, daemon=True).start()
+
     def board_health(self):
         d = self._selected_device()
         if not d:
@@ -1268,17 +1301,19 @@ class App:
             sub = d.get("subject") or {}
             ond = d.get("ond") or {}
             lvl = d.get("level")
-            vals = (d.get("name") or d["id"], d.get("ip", ""), sub.get("name", "— nobody —"),
+            pressed = d.get("pressed_s") is not None and d["pressed_s"] < 6
+            vals = ((d.get("name") or d["id"]) + ("  ● pressed" if pressed else ""), d.get("ip", ""), sub.get("name", "— nobody —"),
                     "yes" if d.get("contact") else "no", d.get("bpm") if d.get("bpm") is not None else "—",
                     "%d%%" % round(lvl * 100) if lvl is not None else "—",
                     ("FLAG · " if d.get("flag") else "") + (d.get("state") or "") if d.get("connected") else "offline",
                     ("%s%s" % (ond.get("st", ""), " · %d%%" % round(ond["l"] * 100) if ond.get("l") is not None else "")
                      ) if ond else "—")
             keep.add(d["id"])
+            tags = ("pressed",) if pressed else ()
             if self.tree.exists(d["id"]):
-                self.tree.item(d["id"], values=vals)
+                self.tree.item(d["id"], values=vals, tags=tags)
             else:
-                self.tree.insert("", "end", iid=d["id"], values=vals)
+                self.tree.insert("", "end", iid=d["id"], values=vals, tags=tags)
         for iid in self.tree.get_children():
             if iid not in keep:
                 self.tree.delete(iid)

@@ -22,6 +22,7 @@ once in PowerShell (a few minutes, about 1 GB):
 | show the demo, no hardware | **Demo** → Start WESAD demo | `.\run.ps1 anomaly.serve` |
 | show the *fleet* demo, no hardware | **Demo** → Start fleet demo | `.\run.ps1 anomaly.virtual_board` |
 | run the real thing | **Live** → Start master | `.\run.ps1 anomaly.fleet` |
+| check the master + every board it sees | **Live** → Smoke test | `.\run.ps1 anomaly.smoke --expect 2` |
 | put a board on WiFi | **Board setup** → Connect board | `.\run.ps1 anomaly.device_wifi --hotspot` |
 | record a stress session | **Stress session** → Start | `.\run.ps1 anomaly.protocol run` |
 | find out why something broke | **Advanced** → Check setup | `.\run.ps1 doctor` |
@@ -96,6 +97,7 @@ is back to the system python, which is the usual reason it "stops working".
 | command | status | what it is |
 |---|---|---|
 | `anomaly.fleet` | **the demo** | find every board on the LAN, score them all, roster at :8002 |
+| `anomaly.smoke` | current | read-only live check of the master and every board: health, self-test, IMU, 64 Hz stream, verdicts landing. exits 1 on a FAIL |
 | `pulse_display/make_web_assets.py` | **required** | rebuild the board's web pages. after ANY dashboard edit, and on every fresh clone |
 | `anomaly.serve` | current | single-stream dashboard at :8001 — WESAD replay, or one board over USB |
 | `anomaly.virtual_board` | current | replays WESAD subjects as boards on :8101+, for a fleet demo with no hardware |

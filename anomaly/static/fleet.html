@@ -19,7 +19,12 @@
          border-radius:7px;padding:6px 9px;font-size:13px;max-width:100%}
   main{padding:22px;display:grid;gap:16px;
        grid-template-columns:repeat(auto-fill,minmax(330px,1fr))}
-  .card{background:var(--card);border:1px solid var(--line);border-radius:11px;padding:16px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:11px;padding:16px;
+        transition:box-shadow .3s,border-color .3s}
+  /* the wearer pressed S1: this is the card for the board in their hand */
+  .card.pressed{border-color:var(--accent);box-shadow:0 0 0 3px rgba(46,134,171,.6)}
+  .press{font-size:12px;color:#7cc4ff;margin:-4px 0 8px}
+  .ident{font-size:11px;padding:3px 9px;border-radius:6px;flex:none}
   .top{display:flex;align-items:center;gap:9px;margin-bottom:10px}
   .dot{width:9px;height:9px;border-radius:50%;background:var(--dim);flex:none}
   .dot.on{background:var(--ok)}
@@ -159,7 +164,7 @@
 const $ = i => document.getElementById(i);
 let devices = [], subjects = [], events = {};
 // the API this page was written against; the master reports its own in /api/devices
-const NEEDS_API = 13;
+const NEEDS_API = 14;
 
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g,
   c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -195,7 +200,9 @@ function buildCard(id){
       <span class="id js-name"></span>
       <button class="pen js-rename-dev" title="Rename this board">&#9998;</button>
       <span class="ip js-ip"></span>
+      <button class="ident js-ident" title="Flash this board's green LED for 5 s">Identify</button>
     </div>
+    <div class="press js-press" hidden>&#9679; button pressed on this board</div>
     <div class="wear">
       <select class="js-sel"></select>
       <button class="pen js-rename-sub" title="Rename this subject">&#9998;</button>
@@ -229,11 +236,13 @@ function buildCard(id){
              clear:q('clear'),
              qual:q('qual'), ond:q('ond'), stale:q('stale'),
              renameDev:q('rename-dev'), renameSub:q('rename-sub'),
+             ident:q('ident'), press:q('press'),
              delSub:q('del-sub'), subjSig:null};
 
   c.sel.onchange = () => assign(id, c.sel.value);
   c.clear.onclick = () => clearHistory(id);
   c.renameDev.onclick = () => renameDevice(id);
+  c.ident.onclick = () => identify(id, c.ident);
   c.renameSub.onclick = () => { const d = devices.find(x => x.id === id);
                                 if(d && d.subject) renameSubject(d.subject.id); };
   c.delSub.onclick   = () => { const d = devices.find(x => x.id === id);
@@ -250,8 +259,6 @@ function updateCard(d){
   let verdict, cls, why;
   if(!d.connected){            verdict='OFFLINE'; cls='none';
                                why='no stream from this board'; }
-  else if(!d.subject){         verdict='—';       cls='none';
-                               why='nobody assigned — the flag has no one to be about'; }
 
   // without contact, say what the finger check is doing: a new finger waits a
   // few seconds to be believed, and that wait used to read as "no finger"
@@ -272,7 +279,7 @@ function updateCard(d){
                                verdict='CLEARING'; cls='hold';
                                why='was flagged · deviation '+pct+'% is back under the line'; }
   else if(d.flag){             verdict='STRESSED';cls='flag';
-                               why='deviation '+pct+"% · above "+d.subject.code+"'s baseline"; }
+                               why='deviation '+pct+'% · above '+(d.subject ? d.subject.code+"'s" : "this wearer's")+' recent calm'; }
   else {                       verdict='CALM';    cls='calm';
                                why='deviation '+pct+'% · within baseline'; }
 
@@ -282,13 +289,18 @@ function updateCard(d){
   if(c.name.title !== d.id) c.name.title = d.id;
   setText(c.ip, d.ip);
   c.dot.classList.toggle('on', !!d.connected);
+  // S1 was pressed on this board in the last few seconds: light the card
+  const pressed = d.pressed_s != null && d.pressed_s < 6;
+  c.root.classList.toggle('pressed', pressed);
+  c.press.hidden = !pressed;
+  c.ident.disabled = !d.connected;
   setText(c.verdict, verdict);
   if(c.verdict.className !== 'verdict js-verdict ' + cls)
     c.verdict.className = 'verdict js-verdict ' + cls;
   // an uncalibrated verdict is a real verdict -- the model against a stranger --
   // but it is not the same claim as a calibrated one, so it never goes unlabelled
-  if(d.calibrated === false && d.subject && d.state === 'zero')
-    why = 'ZERO-SHOT · ' + why + ' · no calibration yet';
+  if(d.calibrated === false && d.state === 'zero')
+    why = 'ZERO-SHOT · ' + why + (d.subject ? ' · no calibration yet' : '');
   setText(c.why, why);
   // a refused window is not a calm one: say which it is, rather than leaving a
   // stale level on screen as though it were current
@@ -343,7 +355,8 @@ function updateCard(d){
   setText(c.base, b
     ? 'baseline '+b.threshold+' from '+b.n_windows+' calm windows · '+ago(b.created)
     : (d.subject ? 'no baseline — flagging zero-shot at k=' + (d.k_sigma ?? '—')
-                   + ' · calibrate to use ' + d.subject.code + "'s own calm" : ''));
+                   + ' · calibrate to use ' + d.subject.code + "'s own calm"
+                 : 'nobody assigned — scored zero-shot, nothing recorded · assign a wearer to keep flags and calibrate'));
 
   const cal = d.calib;
   const pr = d.protocol;
@@ -478,6 +491,14 @@ async function clearHistory(id){
   if(!r) return;
   events[id] = [];
   await refreshEvents(); await refreshSubjects(); tick();
+}
+
+// flash the board's LED so a person can find it; the button says it worked
+async function identify(id, btn){
+  const r = await post(`/api/devices/${id}/identify`);
+  if(!r || !btn) return;
+  btn.textContent = 'Flashing…';
+  setTimeout(() => { btn.textContent = 'Identify'; }, 5000);
 }
 
 async function renameDevice(id){

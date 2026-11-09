@@ -148,6 +148,30 @@ resistor divider from BatP to a spare ADC pin (GPIO3 is free). the green LED
 finger, short blip each second = checking the finger, solid = finger on, fast
 blink = flagged.
 
+**S1 controls (`pulse_headless`).** one button, no double press, so nothing
+waits to see if a second press follows:
+- short press (released under 1 s): D1 answers 1 blink = no WiFi, 2 = WiFi but
+  no master, 3 = master connected. the press is counted in every frame (`btn`),
+  and the master lights that board's roster card + its Pulse Control row for ~6 s.
+- 1-2 s: nothing, so a slow press can't put the board to sleep.
+- hold 2 s+, release: sleep (unchanged). the press that wakes it is ignored.
+- roster **Identify** (or Pulse Control "Identify") → master → `GET /identify?s=5`
+  → D1 flashes fast for 5 s. a reviewer token may do this; it stores nothing.
+- auto-sleep: no finger and still (`mot` < 0.06) for 10 min → 3 slow blinks → sleep.
+  a finger, movement or a press cancels it. never with the IMU silent. `/health`
+  adds `btn=` (presses since boot) and `idle=` (seconds toward the 10 min).
+  sleep still draws mA on Rev F (TPS63001 PS/SYNC tied high), so unplug the
+  battery for storage.
+
+**Unassigned boards are scored (2026-11-09).** `Device.scoring` used to be
+"has a subject", so a board nobody was assigned to showed "No verdict yet"
+forever. now every board is scored zero-shot (K_DEFAULT, live scale) and shows
+warming → calm/stressed, marked ZERO-SHOT on the roster. what still needs a
+wearer is `Device.recording`: sessions, readings, flag episodes and their saved
+waveforms, calibration and protocol sessions. an unassigned board stores
+nothing. its Calibrate button gets `nosubject` back and Pulse Watch says to
+assign a wearer first.
+
 ---
 
 ## Gotchas that cost real time

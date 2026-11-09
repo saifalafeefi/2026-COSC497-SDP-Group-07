@@ -107,9 +107,26 @@ struct Verdict {
 // Hold past S1_HOLD_MS and release to sleep; press again to wake. The release
 // is required, not cosmetic: arming ext0 for a LOW level while the button is
 // still down wakes the chip the instant it sleeps.
+//
+// A short press (released inside S1_SHORT_MS) is "which board is this, and is
+// it connected?": D1 answers with a status code and the press rides out in
+// every frame as `btn`, so the master lights this board's roster card. Between
+// S1_SHORT_MS and S1_HOLD_MS a release does nothing, so a slow short press can
+// never put the board to sleep. There is no double press: a single press acts
+// at once instead of waiting to see whether a second one follows.
 #define S1_PIN         1
 #define S1_HOLD_MS     2000
+#define S1_SHORT_MS    1000
 #define S1_DEBOUNCE_MS 40
+
+// Auto-sleep: no finger and lying still (the IMU's motion figure under
+// AUTO_SLEEP_MOT) for AUTO_SLEEP_MS, then D1 gives AUTO_SLEEP_WARN_MS of slow
+// blinks and the board sleeps exactly as a held S1 would. A finger, movement or
+// a press during the blinks cancels it. With no IMU answering it never auto-
+// sleeps -- stillness cannot be told from being carried around.
+#define AUTO_SLEEP_MS      (10UL * 60UL * 1000UL)
+#define AUTO_SLEEP_MOT     0.06f     // still reads ~0.003-0.03, a hand moving 0.2+
+#define AUTO_SLEEP_WARN_MS 3000
 
 // =====================================================
 // D1, the green status LED
@@ -123,8 +140,28 @@ struct Verdict {
 //   solid       finger on, calm or warming up
 //   fast blink  finger on and flagged (master's verdict or the board's own)
 // Full drive is glaring, so it runs on PWM at STATUS_LED_DUTY / 255.
+//
+// Three patterns borrow D1 for a few seconds, then hand it back:
+//   1/2/3 blinks  answer to a short S1 press: 1 = no WiFi, 2 = WiFi but no
+//                 master, 3 = the master is connected
+//   rapid flash   "identify": the roster's Identify button (GET /identify)
+//   3 slow blinks auto-sleep is about to happen
 #define STATUS_LED_PIN  2
 #define STATUS_LED_DUTY 6
+#define LED_CODE_DUTY   24     // status code: has to be readable at a glance
+#define LED_ID_DUTY     80     // identify: findable across a room
+#define IDENTIFY_MS     5000
+
+enum : uint8_t { PAT_NONE = 0, PAT_STATUS, PAT_IDENT, PAT_SLEEPWARN };
+static volatile uint8_t  ledPat = PAT_NONE;
+static volatile uint32_t ledPatStart = 0;
+static volatile uint8_t  ledPatN = 0;            // blinks in a status code
+static volatile uint32_t ledPatLen = 0;          // identify duration, ms
+// /identify runs on the async web task; it only leaves a request here and the
+// main loop's statusLedPoll() starts the pattern
+static volatile uint32_t identifyReq = 0;        // requested duration, 0 = none
+static volatile uint16_t btnPresses = 0;         // short presses since boot -> "btn"
+static volatile uint32_t idleSinceMs = 0;        // auto-sleep: last finger / motion / press
 
 // =====================================================
 // U4, the BNO086 IMU -- the wrist accelerometer
@@ -929,30 +966,67 @@ void drawStatus() {
 // D1's pattern, from the same finger state and verdict the dashboards get.
 // Re-read every 50 ms and only written on a change, so it is cheap enough to
 // sit in the sample loop beside s1Poll().
+// The borrowed patterns (status code, identify, sleep warning) win while they
+// run; -1 = none running, fall through to the finger/verdict pattern.
+static int ledPatternDuty(uint32_t now) {
+  uint32_t req = identifyReq;
+  if (req) {
+    identifyReq = 0;
+    ledPat = PAT_IDENT;
+    ledPatStart = now;
+    ledPatLen = req;
+  }
+  uint32_t t = now - ledPatStart;
+  switch (ledPat) {
+    case PAT_IDENT:
+      if (t >= ledPatLen) break;
+      return (t % 200) < 100 ? LED_ID_DUTY : 0;
+    case PAT_STATUS: {
+      // 400 ms dark first, so the code never runs into whatever was lit, then
+      // N x (250 on, 350 off), then 600 ms dark before handing D1 back
+      if (t < 400) return 0;
+      uint32_t u = t - 400, n = ledPatN;
+      if (u < n * 600) return (u % 600) < 250 ? LED_CODE_DUTY : 0;
+      if (u < n * 600 + 600) return 0;
+      break;
+    }
+    case PAT_SLEEPWARN:                     // ended by autoSleepPoll(), not here
+      return (t % 1000) < 600 ? LED_CODE_DUTY : 0;
+    default:
+      return -1;
+  }
+  ledPat = PAT_NONE;
+  return -1;
+}
+
 void statusLedPoll() {
   static uint32_t lastMs = 0;
-  static int8_t lit = -1;
+  static int lastDuty = -1;
   uint32_t now = millis();
   if (now - lastMs < 50) return;
   lastMs = now;
 
-  int n, of;
-  long keep;
-  const char *st = fingerState(&n, &of, &keep);
-  bool on;
-  if (strcmp(st, "on") == 0) {
-    on = verdictNow().flag == 1 ? (now % 250) < 125 : true;
-  } else if (strcmp(st, "check") == 0 && n >= 1) {
-    // not "unsteady", and not before one whole passing second: an empty
-    // sensor's noise and room-light flicker cross the pulse line for an
-    // instant now and then, and blinked the LED with nothing on it
-    on = (now % 1000) < 100;
-  } else {
-    on = false;
+  int duty = ledPatternDuty(now);
+  if (duty < 0) {
+    int n, of;
+    long keep;
+    const char *st = fingerState(&n, &of, &keep);
+    bool on;
+    if (strcmp(st, "on") == 0) {
+      on = verdictNow().flag == 1 ? (now % 250) < 125 : true;
+    } else if (strcmp(st, "check") == 0 && n >= 1) {
+      // not "unsteady", and not before one whole passing second: an empty
+      // sensor's noise and room-light flicker cross the pulse line for an
+      // instant now and then, and blinked the LED with nothing on it
+      on = (now % 1000) < 100;
+    } else {
+      on = false;
+    }
+    duty = on ? STATUS_LED_DUTY : 0;
   }
-  if ((int8_t)on != lit) {
-    lit = on;
-    ledcWrite(STATUS_LED_PIN, on ? STATUS_LED_DUTY : 0);
+  if (duty != lastDuty) {
+    lastDuty = duty;
+    ledcWrite(STATUS_LED_PIN, duty);
   }
 }
 
@@ -1663,6 +1737,15 @@ void webBegin() {
     req->send(200, "text/plain", "ok");
   });
 
+  // "which board is this?" -- the roster's Identify button, through the master.
+  // D1 flashes fast for s seconds (default 5). Only a request is left here; the
+  // main loop starts the pattern.
+  server.on("/identify", HTTP_GET, [](AsyncWebServerRequest *req) {
+    long s = req->hasParam("s") ? req->getParam("s")->value().toInt() : IDENTIFY_MS / 1000;
+    identifyReq = (uint32_t)constrain(s, 1L, 30L) * 1000UL;
+    req->send(200, "text/plain", "ok");
+  });
+
   // Calibration progress, pushed by the master while a session runs. The board
   // does not calibrate anything -- it cannot score its own windows -- it just
   // forwards the master's progress to whichever dashboards are open.
@@ -1781,7 +1864,10 @@ void webBegin() {
                   " dhold=" + String(bdHolds) +
                   " ddrop=" + String(bdDropped) +
                   " self=" + String(bdReady ? "pass" : (strncmp(bdSelf, "off", 3) == 0 ? "off" : "fail")) +
-                  " psram=" + String(heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+                  " psram=" + String(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)) +
+                  // short S1 presses since boot, and seconds toward auto-sleep
+                  " btn=" + String((unsigned)btnPresses) +
+                  " idle=" + String((unsigned long)((millis() - idleSinceMs) / 1000));
     req->send(200, "text/plain", body);
   });
 
@@ -1961,7 +2047,7 @@ void wsTick() {
            "\"idx\":[%s],\"bvp\":[%s],\"level\":%s,\"flag\":%s,\"score\":0,"
            "\"bpm\":%s,\"spo2\":%s,\"quality\":null,\"label\":\"-\",\"sens\":%.3f,"
            "\"thr_level\":%.3f,\"state\":\"%s\",\"warm_s\":%ld,"
-           "\"subject\":\"%s\",\"src\":\"%s\",\"motion\":%s,\"acc\":[%s],"
+           "\"subject\":\"%s\",\"src\":\"%s\",\"motion\":%s,\"acc\":[%s],\"btn\":%u,"
            "\"ond\":{\"st\":\"%s\",\"l\":%s,\"f\":%d,\"s\":%.4f,\"ms\":%lu,\"m\":\"%s\"},"
            "\"device\":{\"connected\":true,\"port\":\"esp32\",\"contact\":%s,\"dropped\":%lu,"
            "\"finger\":{\"st\":\"%s\",\"n\":%d,\"of\":%d,\"keep\":%ld}}}",
@@ -1976,7 +2062,7 @@ void wsTick() {
            // answering, their reason for having no verdict is worth reporting
            (v.fresh ? v.state : "stale"), (long)v.wait,
            hostSubject[0] ? hostSubject : devId.c_str(),
-           v.src, motStr, acc,
+           v.src, motStr, acc, (unsigned)btnPresses,
            BD_ST_NAME[bdStateId], ondLevel, (int)bdFlag, (double)bdScore,
            (unsigned long)bdMs, bdMode ? "motion" : "hr",
            finger ? "true" : "false",
@@ -2463,6 +2549,7 @@ void readInitialSamples() {
       pollHostSerial();
       s1Poll();
       statusLedPoll();
+      autoSleepPoll();
       bnoPoll();
       accFeatPoll();
       irDcDisplay = (irDcDisplay == 0) ? ir : (irDcDisplay * 15 + ir) / 16;
@@ -2527,6 +2614,7 @@ void calculateReadings() {
 // dashboard sees the board drop off the network and come back.
 static uint32_t s1Down = 0;        // millis() when it was first seen down
 static bool     s1Armed = false;   // held long enough; sleeping on release
+static bool     s1Ignore = false;  // the wake press, still down at boot
 static uint32_t s1Edge = 0;        // last level change, for debounce
 static int      s1Level = HIGH;
 
@@ -2583,7 +2671,73 @@ void s1Poll() {
       s1Armed = false;
       s1Sleep();
     }
-    s1Down = 0;                    // a short press does nothing while awake
+    if (s1Down != 0 && !s1Ignore && (now - s1Down) < S1_SHORT_MS) s1Short(now);
+    s1Down = 0;                    // 1-2 s: nothing, on purpose
+    s1Ignore = false;
+  }
+}
+
+// is the master talking to us? it pushes /flag every second while connected
+bool masterFresh() {
+  uint32_t now = millis();
+  bool demo = (hostDemo != 0 && (now - hostDemoMs) < DEMO_TTL);
+  return !demo && hostFlag >= 0 && hostFlagMs != 0 && (now - hostFlagMs) < HOST_BPM_TTL;
+}
+
+// A short press: count it (the master sees `btn` change and lights this board's
+// card) and answer on D1 with how connected the board is.
+void s1Short(uint32_t now) {
+  btnPresses++;
+  idleSinceMs = now;
+  uint8_t code = WiFi.status() != WL_CONNECTED ? 1 : (masterFresh() ? 3 : 2);
+  ledPatN = code;
+  ledPatStart = now;
+  ledPat = PAT_STATUS;
+#if STREAM_ENABLED
+  Serial.printf("# S1 press %u: status %u (%s)\n", (unsigned)btnPresses, code,
+                code == 3 ? "master connected" : code == 2 ? "WiFi, no master" : "no WiFi");
+#endif
+}
+
+// Once a second from the main loop. Sleeps through s1Sleep(), so a board that
+// dozed off wakes the same way as one put to sleep by hand: press S1.
+void autoSleepPoll() {
+  static uint32_t lastMs = 0;
+  uint32_t now = millis();
+  if (now - lastMs < 1000) return;
+  lastMs = now;
+
+  float mot = accMotion();
+  bool busy = mot < 0.0f                   // no IMU: never sure it is lying still
+           || mot >= AUTO_SLEEP_MOT
+           || fingerDetected()
+           || s1Level == LOW
+           || ledPat == PAT_IDENT;         // someone is looking for this board
+  if (busy) {
+    idleSinceMs = now;
+    if (ledPat == PAT_SLEEPWARN) {
+      ledPat = PAT_NONE;
+#if STREAM_ENABLED
+      Serial.println("# auto-sleep cancelled");
+#endif
+    }
+    return;
+  }
+  if (ledPat == PAT_SLEEPWARN) {
+    if (now - ledPatStart >= AUTO_SLEEP_WARN_MS) {
+#if STREAM_ENABLED
+      Serial.println("# auto-sleep: no finger and still for 10 min");
+#endif
+      s1Sleep();
+    }
+    return;
+  }
+  if (now - idleSinceMs >= AUTO_SLEEP_MS && ledPat == PAT_NONE) {
+    ledPatStart = now;
+    ledPat = PAT_SLEEPWARN;
+#if STREAM_ENABLED
+    Serial.println("# auto-sleep in 3 s: move the board or press S1 to keep it awake");
+#endif
   }
 }
 
@@ -2591,6 +2745,9 @@ void s1Begin() {
   pinMode(S1_PIN, INPUT_PULLUP);
   s1Level = digitalRead(S1_PIN);
   s1Edge = millis();
+  // still holding the press that woke the chip: its release is not a request
+  s1Ignore = (s1Level == LOW);
+  idleSinceMs = millis();
 #if STREAM_ENABLED
   if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT0) {
     Serial.println("# woke from S1. warming up from cold -- 60 s to a verdict.");
@@ -2732,6 +2889,7 @@ void loop() {
       pollHostSerial();
       s1Poll();
       statusLedPoll();
+      autoSleepPoll();
       bnoPoll();
       accFeatPoll();
       irDcDisplay = (irDcDisplay == 0) ? ir : (irDcDisplay * 15 + ir) / 16;

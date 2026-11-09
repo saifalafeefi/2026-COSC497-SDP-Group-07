@@ -5,6 +5,7 @@ Off by default: `python -m anomaly.fleet` behaves exactly as before. With
 
     admin     everything
     reviewer  read-only, plus acknowledging flags (POST /api/events/{id}/ack)
+              and flashing a board's LED (POST /api/devices/{id}/identify)
 
 Missing/wrong token -> 401, right token but wrong role -> 403, and any write
 whose Origin is not this master -> 403 (blocks cross-site request forgery
@@ -46,8 +47,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_LOG = os.path.join(os.path.dirname(HERE), "data", "audit_log.jsonl")
 GENESIS = "0" * 64
 
-# the only write a reviewer may make
-_REVIEWER_WRITES = [re.compile(r"^/api/events/\d+/ack$")]
+# the only writes a reviewer may make: acknowledging a flag, and flashing a
+# board's LED to find it (changes nothing stored)
+_REVIEWER_WRITES = [re.compile(r"^/api/events/\d+/ack$"),
+                    re.compile(r"^/api/devices/[^/]+/identify$")]
 _WRITE = {"POST", "PUT", "PATCH", "DELETE"}
 
 

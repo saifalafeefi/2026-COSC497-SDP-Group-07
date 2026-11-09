@@ -64,7 +64,7 @@ HTTP_TIMEOUT = 1.0
 # page against its OLD routes -- the page calls an endpoint that does not exist
 # yet and the browser reports a bare "failed". Bump this whenever a route is
 # added or changed; the page checks it and says plainly that a restart is due.
-API_VERSION = 13
+API_VERSION = 14
 
 # how long a board can go without a finger on it before its session is over.
 # generous on purpose: a session is a stretch of monitoring, and closing one
@@ -373,6 +373,15 @@ def push_flag(ip: str, flag: bool, level: float, thr_level: float,
         return False
 
 
+def push_identify(ip: str, secs: int = 5) -> bool:
+    """flash the board's LED fast for `secs`, so a person can find it."""
+    try:
+        with urllib.request.urlopen(f"http://{ip}/identify?s={int(secs)}", timeout=2.0) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
 def push_calib(ip: str, phase: str, windows: int, target: int, can_commit: bool) -> bool:
     """tell the board how the calibration is going, for it to pass on.
 
@@ -439,6 +448,8 @@ class Device:
         self.flag_hist: deque = deque(maxlen=600)   # was it flagging? last 10 min
         self.ond = None                   # the board's own detector, from its frames
         self.finger = None                # the board's finger check, from its frames
+        self.btn = None                   # the board's short-press counter, last seen
+        self.pressed_at = None            # monotonic, when S1 was last pressed
         self.protocol = None              # a ProtocolRun while one is running
         self.last_protocol = None         # how the last one ended, for the console
         self.freeze_norm = False          # a protocol pins the calm reference to its baseline
@@ -467,9 +478,19 @@ class Device:
 
     @property
     def scoring(self) -> bool:
-        """a verdict needs somebody to attribute it to. that is the whole gate.
+        """every connected board gets a verdict, worn by anybody or nobody.
 
-        It used to need a baseline as well, and that reasoning came from the old
+        It used to need a subject: "a verdict needs somebody to attribute it
+        to". But nothing in the verdict itself comes from the subject any more
+        -- the scale is re-estimated live from this wearer's own last minutes,
+        and k_sigma falls back to K_DEFAULT -- so an unassigned board was
+        showing "no verdict" for a reason the wearer could not see or fix.
+        What DOES need a subject is the record: sessions, readings, flag
+        episodes and their saved waveforms all belong to somebody. That gate
+        is `recording`. An unassigned board is scored zero-shot and stores
+        nothing.
+
+        Before that it needed a baseline as well, and that reasoning came from the old
         design where the flag sat at an absolute score this person had recorded:
         without their calm you really were judging them against someone else's
         body. The scale is self-referencing now -- centre and spread are
@@ -483,6 +504,11 @@ class Device:
         calibrated delta is exactly what O6 asks us to report. It is marked
         everywhere it is shown so it cannot be mistaken for a calibrated verdict.
         """
+        return True
+
+    @property
+    def recording(self) -> bool:
+        """is what this board measures written down? only with a wearer."""
         return self.subject is not None
 
     @property
@@ -510,7 +536,7 @@ class Device:
         continuous, so a session is a consequence of someone wearing the board,
         not a mode somebody remembered to enter.
         """
-        if self.session_id is not None or not self.scoring:
+        if self.session_id is not None or not self.recording:
             return
         self.session_id = self.db.open_session(
             self.subject["id"], self.id, "monitor",
@@ -610,9 +636,6 @@ class Device:
         self.ema = raw if self.ema is None else \
             (1.0 - EMA_ALPHA) * self.ema + EMA_ALPHA * raw
         self.score = self.ema
-        if not self.scoring:
-            self.level, self.flag = None, False
-            return
         # the scale comes from the LAST FEW MINUTES, not from the calibration day
         r = np.fromiter(self.recent, dtype=np.float64, count=len(self.recent))
         if len(r) < NORM_MIN:
@@ -706,7 +729,7 @@ class Device:
         for 10%; a great deal more than that means k is too low for this person
         and the honest fix is to recalibrate, not to squint at the banner.
         """
-        if not self.scoring or len(self.flag_hist) < 60:
+        if not self.recording or len(self.flag_hist) < 60:
             return None
         rate = float(np.mean(self.flag_hist))
         return {"flag_rate": round(rate, 3), "n": len(self.flag_hist),
@@ -740,6 +763,7 @@ class Device:
             "state": self.state,
             "baseline_fit": self.baseline_fit(),
             "scoring": self.scoring,
+            "recording": self.recording,      # a wearer: sessions + flags are stored
             "calibrated": self.calibrated,
             "k_sigma": round(self.k_sigma, 2),
             "subject": None if sub is None else
@@ -758,6 +782,9 @@ class Device:
             "ond": self.ond,
             "finger": self.finger,
             "keep_s": self.keep_left(),
+            # seconds since the wearer pressed S1 (the roster lights the card)
+            "pressed_s": None if self.pressed_at is None
+                         else round(time.monotonic() - self.pressed_at, 1),
             "protocol": self.protocol.status() if self.protocol else None,
             "last_protocol": self.last_protocol,
         }
@@ -871,9 +898,10 @@ class Fleet:
                     self.adopt_demo_subject(dev_id, info["wesad"])
                 dev = Device(dev_id, ip, self.det, self.db)
                 self.devices[dev_id] = dev
-                why = ("" if dev.scoring else
-                       "   (no subject assigned)" if dev.subject is None else
-                       f"   ({dev.subject['code']} has no baseline)")
+                why = ("   (nobody assigned: scored zero-shot, nothing recorded)"
+                       if dev.subject is None else
+                       "" if dev.calibrated else
+                       f"   ({dev.subject['code']} has no baseline: zero-shot)")
                 print(f"  found {dev_id} at {ip}{why}", flush=True)
                 asyncio.create_task(self.pump(dev))
         finally:
@@ -969,6 +997,14 @@ class Fleet:
                         dev.ond = m.get("ond")        # None from older firmware
                         dev.finger = d.get("finger")  # likewise
                         dev.motion = m.get("motion")  # likewise; None with no IMU
+                        # S1 short press: the board counts them. a rise is a press;
+                        # a fall is a reboot, which restarts the count at 0
+                        btn = m.get("btn")
+                        if btn is not None:
+                            if dev.btn is not None and btn > dev.btn:
+                                dev.pressed_at = time.monotonic()
+                                print(f"  {dev.id}: button pressed", flush=True)
+                            dev.btn = btn
                         acc = m.get("acc") or []
                         dev.acc.extend(acc)
                         if m.get("sens") is not None:
@@ -1034,9 +1070,6 @@ class Fleet:
                             # the channel warm so the name and state stay fresh
                             state = "idle"
                             dev.quality_note = finger_note(dev.finger, dev.keep_left())
-                        elif not dev.scoring:
-                            state = "none"
-                            dev.quality_note = "no subject assigned"
                         elif len(dev.buf) < WIN:
                             state = "warm"
                             soon = len(dev.buf) + len(dev.pend)   # held back, not lost
@@ -1109,9 +1142,15 @@ async def run_calib(dev, action: str):
     """
     if action == "start":
         # a baseline has to belong to somebody, or it is just a number.
+        # the board's own Calibrate button lands here too, and its page has
+        # already switched to "recording": tell it why nothing will happen
         if dev.subject is None:
+            await asyncio.get_running_loop().run_in_executor(
+                NET, push_calib, dev.ip, "nosubject", 0, CalibSession.TARGET, False)
             return "assign a subject to this board first"
         if dev.protocol:
+            await asyncio.get_running_loop().run_in_executor(
+                NET, push_calib, dev.ip, "cancelled", 0, CalibSession.TARGET, False)
             return "a protocol session is running on this board -- stop it first"
         dev.calib = CalibSession()
         await asyncio.get_running_loop().run_in_executor(
@@ -1272,6 +1311,17 @@ def build_app(fleet: Fleet):
         who = dev.subject["code"] if dev.subject else "nobody"
         print(f"  {dev_id}: now worn by {who}", flush=True)
         return {"ok": True, "subject": dev.status()["subject"]}
+
+    @app.post("/api/devices/{dev_id}/identify")
+    async def identify(dev_id: str):
+        dev = fleet.devices.get(dev_id)
+        if dev is None:
+            return JSONResponse({"error": "unknown device"}, status_code=404)
+        ok = await asyncio.get_running_loop().run_in_executor(NET, push_identify, dev.ip, 5)
+        if not ok:
+            return JSONResponse({"error": f"{dev_id} did not answer at {dev.ip}"},
+                                status_code=502)
+        return {"ok": True}
 
     @app.post("/api/devices/{dev_id}/rename")
     async def rename_device(dev_id: str, body: dict = Body(default={})):
