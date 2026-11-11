@@ -142,6 +142,9 @@ offers 16 MB flash and no Custom scheme, and a 16 MB build boot-loops this board
 | Flash Mode | QIO 80MHz |
 | CPU Frequency | 240MHz (WiFi) |
 
+**easiest: Pulse Control > Board setup > Upload latest firmware**
+(`python -m anomaly.flash`) does all of the below and checks the board booted.
+
 before the first build generate the autoencoder header (14 MB, gitignored):
 `python -m anomaly.board_ae_export` (needs `anomaly/saved/ae.keras` + WESAD).
 without it the sketch still builds, minus the on-board autoencoder. the

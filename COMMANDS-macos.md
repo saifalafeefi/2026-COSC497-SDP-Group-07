@@ -414,6 +414,14 @@ python3 pulse_display/make_web_assets.py     # -> pulse_display/web_assets.h
 stdlib only (`gzip`, `os`, `sys`), so this one really does run on a bare
 `python3` — it is the only command here that does.
 
+**the one-button way:** Pulse Control > Board setup > **Upload latest firmware**
+(or `python3 -m anomaly.flash [--port COMx]`). it finds the board on USB,
+copies the empty `secrets.h` template if there is none, rebuilds the web assets,
+generates `ae_model.h` when the model and WESAD are here, compiles
+`pulse_headless` with the Rev F settings below, uploads, and reads the boot log to
+check both detectors' self-tests. it needs `arduino-cli` (it shares the IDE's
+boards and libraries). the rest of this section is the manual way.
+
 **flash it.** needs two Arduino libraries, both by **ESP32Async** (older forks
 do not build against ESP32 core 3.x): **ESP Async WebServer** and **Async TCP**.
 for the Rev F wearable (`pulse_headless`) the Tools menu is: Board **ESP32S3

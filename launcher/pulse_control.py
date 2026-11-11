@@ -489,6 +489,16 @@ class App:
         self.empty_lbl.pack(anchor="w", pady=(6, 0))
 
     def _tab_board(self, f):
+        row = self._section(f, "Update the board's firmware  (USB)",
+                            "Builds the firmware in this folder with the right settings for the Rev F "
+                            "board (8 MB flash, OPI PSRAM, its own partitions) and flashes the board on "
+                            "USB, then checks it booted. First build ~6 min, later ones 1–2 min. Saved "
+                            "WiFi networks, the wearer and the slider are kept. Close the Arduino Serial "
+                            "Monitor first.")
+        self._btn(row, "Upload latest firmware", lambda: self.run(
+            "flash", "Upload latest firmware", ["-m", "anomaly.flash"], serial=True),
+            when=lambda: self.serial_free() and not self.is_running("flash"), big=True)
+
         row = self._section(f, "Put a board on WiFi  (USB, once per board)",
                             "Plug the board into %s by USB and press the button. %s Close the "
                             "Arduino Serial Monitor first: only one program can use the USB port."

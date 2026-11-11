@@ -2686,6 +2686,14 @@ void pollHostSerial() {
           hostBpm = v;
           hostBpmMs = millis();
         }
+      } else if (rxLen == 1 && rxLine[0] == '?') {
+        // one-line status on request: anomaly.flash asks after an upload, since
+        // the boot log is printed before the USB port is back
+        Serial.printf("# status det=%s ae=%s psram=%u ip=%s ble=%d | detector: %s | autoencoder: %s\n",
+                      bdReady ? "pass" : (strncmp(bdSelf, "off", 3) == 0 ? "off" : "fail"), aeStateName(),
+                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                      WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "none",
+                      bleOk ? 1 : 0, bdSelf, aeSelf);
       } else if (rxLen >= 2 && rxLine[0] == 'W' && rxLine[1] == '?') {
         wifiReport();
       } else if (rxLen >= 2 && rxLine[0] == 'W' && rxLine[1] == '!') {
