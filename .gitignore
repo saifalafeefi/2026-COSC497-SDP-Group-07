@@ -83,3 +83,14 @@ pulse_headless/web_assets.h
 
 # iconutil's intermediate; launcher/icon/PulseControl.icns is committed
 launcher/icon/PulseControl.iconset/
+
+# android app: build output, local SDK path, release signing
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/keystore/
+
+# the built app, handed out directly, never committed
+android/*.apk
+android/*.log

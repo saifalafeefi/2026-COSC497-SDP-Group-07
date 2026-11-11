@@ -67,9 +67,9 @@ dashboard's heart rate, and falls back to its own estimate when untethered.
 
 **the flag is calibrated on our own sensor.** `scorer.npz` holds WESAD *wrist*
 thresholds; this rig is a *fingertip* sensor, so those thresholds meant nothing here.
-`anomaly/device_calibrate.py` — or the dashboard's Calibrate button, which applies
-the result live — records the user's own calm, gates it, and re-derives the
-threshold on it. **the transfer delta on our rig: our calm median (0.282) scores
+`anomaly/device_calibrate.py` — or, on the fleet, the roster's Calibrate button
+(the only place a calibration starts; the board keeps the result) — records the
+user's own calm, gates it, and re-derives the threshold on it. **the transfer delta on our rig: our calm median (0.282) scores
 above the WESAD threshold (0.212), so a zero-shot wrist model flags essentially
 100% of our calm; device-calibrated that is 10% by construction.** measured on one
 subject, calm only.
@@ -92,6 +92,17 @@ own verdict takes over, marked ON-DEVICE. on WESAD LOSO the board's rule scores
 replaced (0.635) — see `anomaly/RESULTS.md`. at boot the board checks its C++ against the Python reference
 (`/health` → `self=pass`); on the rig it takes ~210 ms a second on core 0 and
 leaves the sensor loop untouched.
+
+**the board runs the master's autoencoder too.** the same model, rewritten so
+every layer has a fast kernel on the chip (same math, no retraining), scores the
+board's cleaned window every 5 s in ~0.3–0.45 s, bit-exact with the PC. the board
+works out the master's own score from it — so with the PC gone, the full model
+still runs on the device (`anomaly/board_ae_export.py`, `pulse_headless/board_ae.h`).
+
+**a phone app reads the band directly.** Pulse Watch for Android (`android/`)
+pairs with the band over Bluetooth LE and shows its own verdict, the live pulse,
+history and exports — no WiFi, IP or PC needed. it can also put a fresh band on
+the phone's WiFi network over an encrypted link and show its IP for the master.
 
 **not yet shown:** that the flag *rises under stress* on this hardware. everything
 above establishes what calm looks like. `anomaly/protocol.py` records the test —
@@ -268,6 +279,10 @@ pulse_display/                       ESP32-S3 firmware WITH a TFT: streams IR/RE
 pulse_headless/                      the same firmware for a board with NO screen (Rev F wearable)
   pulse_headless.ino                 identical but for the display: sensor on GPIO8/9, no TFT
                                      — a separate sketch, so non-display fixes must land in both
+  board_ae.h                         the master's autoencoder, run on the board (TFLite Micro)
+  board_ble.h                        Bluetooth LE for the phone app (status, pulse, WiFi setup)
+  partitions.csv                     one 7.9 MB app slot: firmware + the 4.2 MB model
+android/                             Pulse Watch for Android: pair, live view, history, export
 pulse/                               Pulse Watch product UI (Zayed) — served at / by anomaly/serve.py
   Pulse Watch.dc.html / support.js   design-tool export; speaks serve.py's /ws protocol
 WESAD/ · Code & Data/                datasets (not in git)

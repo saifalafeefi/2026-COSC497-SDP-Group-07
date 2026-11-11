@@ -28,7 +28,7 @@
 
 #define AE_PERIOD_MS   5000          // one window every 5 s: ~2 min of a 150 mAh charge
 #define AE_ARENA_BYTES (384 * 1024)  // measured need 258 KB; PSRAM
-#define AE_STACK       24576         // 8 KB corrupted the heap in the bench
+#define AE_STACK       12288         // uses ~2.5 KB (aestk); internal RAM is scarce with Bluetooth on
 #define AE_FRESH_MS    12000         // older than this, the score is not used
 
 // results, written by the AE task, read anywhere

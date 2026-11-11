@@ -93,8 +93,7 @@ input{font-family:inherit}
               <sc-if value="{{ showCalibPrompt }}" hint-placeholder-val="{{ false }}">
                 <div style="display:flex;align-items:center;gap:14px;padding:14px 18px;border-radius:16px;background:#ECF2FE;border:1px solid #DBE6FB">
                   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#5B8DEF" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" style="flex:none"><path d="M12 2v3m0 14v3m10-10h-3M5 12H2m15.07-5.07-2.12 2.12M9.05 14.95l-2.12 2.12m0-10.14 2.12 2.12m5.9 5.9 2.12 2.12"></path></svg>
-                  <div style="flex:1;min-width:0"><div style="font-weight:700;font-size:14px">Personalize this monitor</div><div style="font-size:13px;color:#6B7787">Record 2 minutes of your calm to tune flagging to your normal.</div></div>
-                  <button onClick="{{ onOpenCalib }}" style="padding:9px 15px;border-radius:10px;background:#5B8DEF;color:#fff;font-weight:600;font-size:13px;white-space:nowrap;flex:none">Calibrate</button>
+                  <div style="flex:1;min-width:0"><div style="font-weight:700;font-size:14px">Not calibrated to this wearer</div><div style="font-size:13px;color:#6B7787">Calibration is done from the master: ask whoever runs Pulse Fleet to press Calibrate on this board.</div></div>
                 </div>
               </sc-if>
 
@@ -253,9 +252,7 @@ input{font-family:inherit}
                     <span style="font-size:12px;color:#6B5B8A">ground truth: <b style="color:#5B3F94">{{ demoLabel }}</b></span>
                   </div>
                 </sc-if>
-                <button onClick="{{ onOpenCalib }}" style="display:flex;align-items:center;gap:8px;padding:11px 16px;border-radius:12px;background:#ECF2FE;color:#3D6FD0;font-weight:600;font-size:14px">
-                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v3m0 14v3m10-10h-3M5 12H2"></path></svg>Calibrate
-                </button>
+                <!-- no Calibrate here: calibration is started from the master's roster only -->
               </div>
 
               <div style="text-align:center;font-size:12px;color:#9AA6B2;padding:6px 0 8px">An early-warning aid, not a diagnostic device. Every flag is reviewed by a person.</div>
@@ -382,8 +379,8 @@ input{font-family:inherit}
                   <button onClick="{{ onTogglePoor }}" style="position:relative;width:46px;height:26px;border-radius:999px;background:{{ poorTrack }};transition:background .2s;flex:none"><span style="position:absolute;top:3px;left:{{ poorKnob }};width:20px;height:20px;border-radius:999px;background:#fff;box-shadow:0 1px 3px rgba(16,24,40,.25);transition:left .2s"></span></button>
                 </div>
                 <div style="display:flex;align-items:center;gap:14px;padding-top:16px">
-                  <div style="flex:1;min-width:0"><div style="font-weight:600;font-size:14px">Personalize to this person</div><div style="font-size:12px;color:#6B7787">Record 2 minutes of calm to tune flagging to their normal.</div></div>
-                  <button onClick="{{ onOpenCalib }}" style="padding:9px 15px;border-radius:10px;background:#ECF2FE;color:#3D6FD0;font-weight:600;font-size:13px;flex:none">Recalibrate</button>
+                  <div style="flex:1;min-width:0"><div style="font-weight:600;font-size:14px">Personalize to this person</div><div style="font-size:12px;color:#6B7787">Calibration is done from the master: open Pulse Fleet's roster and press Calibrate on this board. Its progress shows here while it runs.</div></div>
+                  <span style="padding:7px 12px;border-radius:10px;background:#F0F4F9;color:#6B7787;font-weight:600;font-size:12px;flex:none">From the master</span>
                 </div>
               </div>
 
@@ -929,7 +926,7 @@ class Component extends DCLogic {
     else status='calm';
     // history sampling
     if(c.elapsed - this.lastHist > 0.5 || this.lastHist===0){ this.lastHist=c.elapsed; this.levelHist.push({t:c.elapsed, level:c.level, hr:c.bpm}); if(this.levelHist.length>800) this.levelHist.shift(); }
-    this.setState({ statusState:status, flag:flag, warmS:c.warmS||0, warming:warming, flagTimeStr:flagTimeStr, level:this.smooth, elapsed:c.elapsed, buf:c.buf, bpm:c.bpm, spo2:c.spo2, motion:c.motion, quality:c.q, qualityLabel:ql, label:c.label, finger:c.finger||null, verdictSrc:c.src||null });
+    this.setState({ statusState:status, flag:flag, warmS:c.warmS||0, warming:warming, flagTimeStr:flagTimeStr, level:this.smooth, elapsed:c.elapsed, buf:c.buf, bpm:c.bpm, spo2:c.spo2, motion:c.motion, quality:c.q, qualityLabel:ql, label:c.label, finger:c.finger||null, verdictSrc:c.src||null, why:c.why||'', calOnBoard:(c.cal!=null?c.cal:null) });
   }
 
   // ---------- calibration ----------
@@ -996,7 +993,7 @@ class Component extends DCLogic {
       // noise is amplitude-consistent. blank them rather than assert them.
       const nc = !!(m.device && m.device.contact===false);
       this.simClock=m.elapsed||this.simClock;
-      this.cur={ state:m.state||null, warmS:m.warm_s||0, level:m.level??0, bpm:(nc||m.bpm==null?null:m.bpm), spo2:(nc||m.spo2==null?null:m.spo2), motion:(m.motion!=null?m.motion:null), q:(nc?null:q), buf:m.buf??this.state.win, win:m.win??this.state.win, elapsed:m.elapsed||0, label:m.label||'—', flagProvided:true, flag:!!m.flag, noContact:nc, finger:(m.device&&m.device.finger)||null, src:m.src||null };
+      this.cur={ state:m.state||null, warmS:m.warm_s||0, level:m.level??0, bpm:(nc||m.bpm==null?null:m.bpm), spo2:(nc||m.spo2==null?null:m.spo2), motion:(m.motion!=null?m.motion:null), q:(nc?null:q), buf:m.buf??this.state.win, win:m.win??this.state.win, elapsed:m.elapsed||0, label:m.label||'—', flagProvided:true, flag:!!m.flag, noContact:nc, finger:(m.device&&m.device.finger)||null, src:m.src||null, why:(typeof m.why==='string'?m.why:''), cal:(m.cal!=null?m.cal:null) };
       // the name can change while the page is open -- rename on the roster and
       // the board's own dashboard should follow, not wait for a reload
       if(m.subject && m.subject !== this.state.subjectName)
@@ -1040,6 +1037,9 @@ class Component extends DCLogic {
       this.calib.canCommit = !!m.can_commit;
       this.calib.blocking = m.blocking||[];
       this.calib.gate = m.gate||'';
+      // calibration is started from the master's roster only: say it is running
+      if(m.phase==='record' && !this._calibToastShown){ this._calibToastShown=true; this.setState({toast:'The master is calibrating this board — sit still and relax for 2 minutes'}); clearTimeout(this._tT); this._tT=setTimeout(()=>this.setState({toast:null}),6000); }
+      if(m.phase!=='record' && m.phase!=='learn') this._calibToastShown=false;
       if(m.phase==='done'){ this._personalized=true; this.setState({toast:'Calibrated on your own calm — '+(m.windows||0)+' windows'}); clearTimeout(this._tT); this._tT=setTimeout(()=>this.setState({toast:null}),4200); }
       this.forceUpdate();
     } else if(m.type==='state'){ this.setState({running:!!m.running}); }
@@ -1320,17 +1320,17 @@ class Component extends DCLogic {
     const map={
       offline:{word:'Disconnected',sub:'trying to reconnect…',color:'#94A3B8',soft:'#EEF1F5',glow:'rgba(148,163,184,.16)',iconPath:'M4 4l16 16 M12 3a9 9 0 0 0-9 9 M21 12a9 9 0 0 0-3.5-7.1',aura:'none'},
       paused:{word:'Paused',sub:'press Start to resume monitoring',color:'#6B7787',soft:'#F0F4F9',glow:'rgba(107,119,135,.13)',iconPath:'M9 5v14 M15 5v14',aura:'none'},
-      poorSignal:{word:'Signal weak — hold still',sub:'adjust the sensor and stay still',color:'#7C8898',soft:'#EEF1F5',glow:'rgba(148,163,184,.16)',iconPath:'M3 12c2-4 4-4 6 0s4 4 6 0 4-4 6 0',aura:'none'},
-      noVerdict:{word:'No verdict yet',sub:'the master has not scored this board yet',
+      poorSignal:{word:'Signal weak — hold still',sub:st.why||'adjust the sensor and stay still',color:'#7C8898',soft:'#EEF1F5',glow:'rgba(148,163,184,.16)',iconPath:'M3 12c2-4 4-4 6 0s4 4 6 0 4-4 6 0',aura:'none'},
+      noVerdict:{word:'No verdict yet',sub:st.why||'the master has not scored this board yet',
         color:'#7C8898',soft:'#EEF1F5',glow:'rgba(148,163,184,.16)',
         iconPath:'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18 M12 8v5',aura:'none'},
-      warming:{word:'Warming up — '+nLeft+'s left',sub:'filling the first '+st.winS+'s window',color:'#5B8DEF',soft:'#ECF2FE',glow:'rgba(91,141,239,.17)',iconPath:'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18 M12 7v5l3 2',aura:'none'},
+      warming:{word:((st.why||'').indexOf('settling in')===0?'Settling in — ':'Warming up — ')+nLeft+'s left',sub:(st.why||'').indexOf('settling in')===0?(st.why.replace('settling in — ','')+' · comparing you with your own last few minutes, not a calibration'):(st.why||('filling the first '+st.winS+'s window')),color:'#5B8DEF',soft:'#ECF2FE',glow:'rgba(91,141,239,.17)',iconPath:'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18 M12 7v5l3 2',aura:'none'},
       flagged:{word:'Needs review — possible stress',sub:'flagged at '+(st.flagTimeStr||this.fmt(st.elapsed))+' · peaked '+Math.round(st.level*100)+'%',color:'#F2645A',soft:'#FDECEA',glow:'rgba(242,100,90,.24)',iconPath:'M12 4l9 16H3z M12 10v4 M12 17h.01',aura: rm?'none':'aura 2.6s ease-in-out infinite'},
       clearing:{word:'Settling',sub:'was flagged, now back under the line',
         color:'#E0982A',soft:'#FEF6E6',glow:'rgba(244,183,64,.20)',
         iconPath:'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18 M8 12h8',aura:'none'},
       caution:{word:'Slightly elevated',sub:'watching for sustained change…',color:'#E0982A',soft:'#FEF6E6',glow:'rgba(244,183,64,.20)',iconPath:'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18 M12 8v5 M12 16h.01',aura:'none'},
-      calm:{word:'Calm',sub:'monitoring · '+this.fmtLong(st.elapsed),color:'#2BAE73',soft:'#E9F9F0',glow:'rgba(61,203,127,.15)',iconPath:'M20 6.5L9.5 17 4 11.5',aura:'none'},
+      calm:{word:'Calm',sub:'monitoring · '+this.fmtLong(st.elapsed)+(st.why?' · '+st.why:''),color:'#2BAE73',soft:'#E9F9F0',glow:'rgba(61,203,127,.15)',iconPath:'M20 6.5L9.5 17 4 11.5',aura:'none'},
       // there was no entry for this, so a bare sensor fell through to `calm`
       // and the panel showed a green tick beside a gauge reading NO FINGER
       checking:{word:"Checking it's a finger — "+(fg.n||0)+'/'+(fg.of||5)+'s',sub:'hold still'+kept,
@@ -1494,7 +1494,7 @@ class Component extends DCLogic {
       onStart:()=>this.start(), onPause:()=>this.pause(), onReset:()=>this.reset(),
       startBg: running?'#E9F9F0':'#2DBE9E', startColor: running?'#2BAE73':'#fff', startShadow: running?'none':'0 6px 16px rgba(45,190,158,.28)',
       showDemoChip: (st.source==='replay') && running && st.label && st.label!=='—', demoLabel: st.label,
-      onOpenCalib:()=>this.openCalib(), showCalibPrompt: st.route==='monitor' && !this._personalized,
+      onOpenCalib:()=>this.openCalib(), showCalibPrompt: st.route==='monitor' && !this._personalized && st.useLive && (st.calOnBoard!=null ? st.calOnBoard===0 : st.calibratedOn!=='device'),
       // overlays
       // patients
       // history

@@ -126,13 +126,49 @@ separate sketches on purpose: **a non-display fix to one is not a fix to the
 other.** `make_web_assets.py` and `anomaly.board_export` both write their
 generated headers into every sketch folder, so those cannot drift.
 
-**Board settings:** ESP32S3 Dev Module, `USB CDC On Boot: Enabled`, and a
-partition scheme with a large enough app partition.
+**Board settings (Rev F, pulse_headless).** the module is an
+**ESP32-S3-WROOM-1-N8R8** (marking `MCN8R8`): 8 MB flash, 8 MB PSRAM. in the
+Arduino IDE pick **ESP32S3 Dev Module** — not "Fri3d Badge 2024", which only
+offers 16 MB flash and no Custom scheme, and a 16 MB build boot-loops this board
+("Detected size(8192k) smaller than ... header(16384k)"). then:
 
-For the Rev F wearable the module is an **ESP32-S3-WROOM-1-N8R8** (marking
-`MCN8R8`), not the N16R8 the rest of these notes assume: set `Flash Size: 8MB
-(64Mb)` with `Partition Scheme: 8M with spiffs (3MB APP/1.5MB SPIFFS)` or
-`default_8MB`, and keep `PSRAM: OPI PSRAM` — the detector still needs it.
+| Tools menu | value |
+|---|---|
+| Flash Size | 8MB (64Mb) |
+| Partition Scheme | **Custom** — uses `pulse_headless/partitions.csv` (one 7.9 MB app slot) |
+| PSRAM | **OPI PSRAM** — both on-board detectors live there; the sketch refuses to build without it |
+| USB CDC On Boot | Enabled |
+| USB Mode | Hardware CDC and JTAG |
+| Flash Mode | QIO 80MHz |
+| CPU Frequency | 240MHz (WiFi) |
+
+before the first build generate the autoencoder header (14 MB, gitignored):
+`python -m anomaly.board_ae_export` (needs `anomaly/saved/ae.keras` + WESAD).
+without it the sketch still builds, minus the on-board autoencoder. the
+`default_8MB` (3 MB app) and "8M with spiffs" schemes are too small once the
+model is in (5.7 MB). from the command line:
+
+```
+arduino-cli compile --fqbn esp32:esp32:esp32s3:FlashSize=8M,PartitionScheme=default_8MB,PSRAM=opi,CDCOnBoot=cdc,USBMode=hwcdc,FlashMode=qio,CPUFreq=240,UploadSpeed=921600 --build-property upload.maximum_size=8257536 pulse_headless
+arduino-cli upload -p COM5 --fqbn <same> pulse_headless
+```
+
+(`partitions.csv` beside the sketch wins over the scheme named in the fqbn;
+only the size check needs the override.) if a board ever reports `psram=0
+self=off det=off` it was built with PSRAM disabled: it then scores nothing
+with the master away.
+
+**the phone app over bluetooth (pulse_headless + android/).** the board
+advertises as "Pulse <last 6 of the MAC>" and serves its own verdict, the 64 Hz
+pulse and a command channel over bluetooth LE (`board_ble.h`); the Pulse Watch
+app in `android/` pairs through android's companion-device sheet and needs no
+wifi or laptop. bluetooth forces wifi modem sleep on (ESP-IDF aborts otherwise):
+fine on the PC hotspot, but on one home router the board stopped answering
+over wifi with power-save on. free heap with both radios ~76 KB. tested from
+the PC with bleak (64 samples/s, 0 gaps) and in the android emulator in demo
+mode, and on a real phone with board 1 (2026-11-11). on-board WiFi setup over
+the encrypted link verified from the PC with a fake network (pending -> fail -> back on
+the old one); not yet with a real network from a phone.
 
 **the autoencoder on the board (pulse_headless).** the master's own model now
 runs on the board too, every 5 s on the detector's cleaned window, as a shadow:

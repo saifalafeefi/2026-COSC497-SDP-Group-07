@@ -416,9 +416,18 @@ stdlib only (`gzip`, `os`, `sys`), so this one really does run on a bare
 
 **flash it.** needs two Arduino libraries, both by **ESP32Async** (older forks
 do not build against ESP32 core 3.x): **ESP Async WebServer** and **Async TCP**.
-set **Tools → PSRAM → OPI PSRAM** (the N16R8's 8 MB) — the on-device detector
-lives there. without it the board still does everything else and reports
-`self=off` (§2.6).
+for the Rev F wearable (`pulse_headless`) the Tools menu is: Board **ESP32S3
+Dev Module** (not Fri3d Badge 2024), Flash Size **8MB**, Partition Scheme
+**Custom** (the sketch's `partitions.csv`), PSRAM **OPI PSRAM**, USB CDC On Boot
+Enabled. the full table and the arduino-cli lines are in `HANDOFF.md`. PSRAM is
+where both on-board detectors live; `pulse_headless` refuses to build without
+it, and a board built without it reports `self=off` and scores nothing on its
+own (§2.6). before the first build, generate the on-board autoencoder (14 MB,
+gitignored):
+
+```
+python3 -m anomaly.board_ae_export
+```
 
 ```
 http://<board-ip>/          Pulse Watch
@@ -432,6 +441,10 @@ http://<board-ip>/health    plain text diagnostics -- try this FIRST
 - `skip` = frames dropped for websocket backpressure (a weak link)
 - `rec` = times the sensor was re-initialised after stalling
 - `det dsc dlv dms dhold ddrop self psram` = the on-device detector (§2.6)
+- `ae aesc am alv aflag ams aen aestk aemem` = the on-board autoencoder: state
+  (wait = no fresh window yet), raw score, the master's score worked out on the
+  board, its level, flag, ms a run, runs, free stack, model in psram/flash
+- `ble blest blewv` = phones connected over Bluetooth, status / pulse packets sent
 - `imu accn mot imur imuhz` = the Rev F accelerometer: on / quiet / off, samples
   so far, motion 0..1 (still < 0.12), re-kicks, and the rate the chip actually
   sends (~65 Hz, averaged down to 32)
@@ -661,6 +674,24 @@ python -m anomaly.board_export               # rewrite board_model.h
 committed so a fresh clone compiles. `board_detector.h` is the algorithm, a
 line-for-line port of the mirror in `board_export.py`: change one, change the
 other, re-run `--check`, reflash, and read `self=`.
+
+### 2.7 the phone app (Pulse Watch for Android)
+
+the band's dashboard on a phone over Bluetooth LE: no WiFi, IP or master needed.
+pair it from the app ("Find my band" opens Android's own pairing sheet); it shows
+the live verdict and pulse, keeps 30 days of history on the phone, exports a PDF
+report or raw CSV, and can put a fresh band on WiFi (it reads the phone's network
+name; the password goes over an encrypted, paired link) and shows the band's IP
+for the master. calibration stays on the master's roster. build the APK (JDK
+17–21 and the Android SDK, platform 35):
+
+```
+cd android
+./gradlew assembleRelease
+```
+
+the APK lands in `android/app/build/outputs/apk/release/`. details in
+`android/README.md`.
 
 ## 3. the store
 

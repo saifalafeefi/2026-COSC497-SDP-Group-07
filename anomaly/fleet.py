@@ -350,7 +350,8 @@ def level_to_sens(level: float) -> float:
 
 
 def push_flag(ip: str, flag: bool, level: float, thr_level: float,
-              state: str = "ok", wait: int = 0, subject: str = "") -> bool:
+              state: str = "ok", wait: int = 0, subject: str = "", note: str = "",
+              calibrated: bool = False) -> bool:
     """the verdict, or the reason there is not one.
 
     the board used to hear from us only when we had a real score, so for the
@@ -365,7 +366,13 @@ def push_flag(ip: str, flag: bool, level: float, thr_level: float,
                                 # the board only knows its MAC-derived id, so its
                                 # own dashboard called the wearer pulse-000000
                                 # whatever they had been renamed to
-                                "n": subject[:27]})
+                                "n": subject[:27],
+                                # why there is no verdict, or what was skipped:
+                                # the board shows it under the headline
+                                "q": (note or "")[:70],
+                                # was this wearer calibrated? the board keeps it
+                                # with the name, so it can say so with us gone
+                                "c": 1 if calibrated else 0})
     try:
         with urllib.request.urlopen(f"http://{ip}/flag?{q}", timeout=2.0) as r:
             return r.status == 200
@@ -996,14 +1003,14 @@ class Fleet:
                             m = json.loads(raw)
                         except Exception:
                             continue
-                        # the board re-broadcasts calibration commands from its
-                        # own dashboard; we are one of its websocket clients, so
-                        # this is how that button reaches the model.
+                        # calibration belongs to the master: only the roster
+                        # (POST /api/calib) starts, commits or cancels one. a
+                        # board or an old dashboard asking over the websocket
+                        # is ignored, not obeyed.
                         cmd = m.get("cmd") or ""
                         if cmd.startswith("calib_"):
-                            err = await run_calib(dev, cmd[len("calib_"):])
-                            if err:
-                                print(f"  {dev.id}: calib {cmd} -> {err}", flush=True)
+                            print(f"  {dev.id}: ignored {cmd} from the board -- "
+                                  "calibrate from the roster", flush=True)
                             continue
                         if m.get("type") != "f":
                             continue
@@ -1098,6 +1105,15 @@ class Fleet:
                             sc, q, why = dev.score_window()
                             dev.quality_note = why
                             dev.apply(sc, q)
+                            # the window is full but the live scale still needs
+                            # NORM_MIN seconds of this wear to compare with: say so, or
+                            # the countdown that just reached 0 seems to restart
+                            if sc is not None and dev.level is None:
+                                # not a calibration: the live reference is this
+                                # wear's own last minutes, in memory only
+                                dev.quality_note = "settling in — %d of %d s%s" % (
+                                    min(len(dev.recent), NORM_MIN), NORM_MIN,
+                                    (" · " + why) if why else "")
                             state = "ok" if sc is not None else "hold"
                             # "zero" reads as a verdict everywhere "ok" does,
                             # and carries the marker with it.
@@ -1110,7 +1126,8 @@ class Fleet:
                         # off the loop: a slow board must not stall the others
                         ok = await asyncio.get_running_loop().run_in_executor(
                             NET, push_flag, dev.ip, dev.flag, dev.level or 0.0,
-                            dev.thr_level, state, wait, dev.subject_label())
+                            dev.thr_level, state, wait, dev.subject_label(),
+                            dev.quality_note, dev.calibrated)
                         dev.pushes += ok
                         dev.fails += (not ok)
             except Exception:
@@ -1156,8 +1173,9 @@ class Fleet:
 async def run_calib(dev, action: str):
     """start / cancel / commit a calibration. returns an error string or None.
 
-    The roster's button and the board dashboard's button both land here, so the
-    two cannot drift apart -- the dashboard's used to reach nothing at all.
+    Only the roster's button lands here (POST /api/calib): calibration is the
+    master's to give. The board's dashboard shows the progress the master pushes
+    to /calib, but has no button that starts one.
     """
     if action == "start":
         # a baseline has to belong to somebody, or it is just a number.
