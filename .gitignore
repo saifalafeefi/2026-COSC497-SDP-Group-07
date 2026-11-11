@@ -54,6 +54,9 @@ anomaly/saved/device_calm.npz
 pulse_display/secrets.h
 pulse_headless/secrets.h
 
+# the on-board autoencoder as C, 14 MB: regenerate with `python -m anomaly.board_ae_export`
+pulse_headless/ae_model.h
+
 # editor cruft from the Arduino web IDE
 pulse_display/.theia/
 pulse_headless/.theia/

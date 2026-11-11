@@ -447,6 +447,7 @@ class Device:
         self.below = 0                    # and under it, for the hysteresis
         self.flag_hist: deque = deque(maxlen=600)   # was it flagging? last 10 min
         self.ond = None                   # the board's own detector, from its frames
+        self.aed = None                   # the board's own run of the autoencoder (shadow)
         self.finger = None                # the board's finger check, from its frames
         self.btn = None                   # the board's short-press counter, last seen
         self.pressed_at = None            # monotonic, when S1 was last pressed
@@ -675,7 +676,8 @@ class Device:
             return
         self.db.add_reading(self.session_id, score=self.score, level=self.level,
                             flag=self.flag, bpm=self.bpm, spo2=self.spo2,
-                            contact=self.contact, quality=self.quality)
+                            contact=self.contact, quality=self.quality,
+                            **self.board_scores())
         # an event is the EPISODE, not the tick: one row from the moment the flag
         # rises to the moment it falls, so a two-minute stress response is one
         # thing to review rather than 120.
@@ -735,6 +737,21 @@ class Device:
         return {"flag_rate": round(rate, 3), "n": len(self.flag_hist),
                 "stale": bool(rate > 0.30)}
 
+    def board_scores(self) -> dict:
+        """what the board itself said this second, for the store: its own
+        detector (ond) and its own run of the autoencoder (aed). None for
+        anything it did not score this second, or firmware that lacks it."""
+        out = dict.fromkeys(("ond_score", "ond_level", "ond_flag",
+                             "ae_score", "ae_master", "ae_level", "ae_flag"))
+        o = self.ond or {}
+        if o.get("st") in ("ok", "hold"):
+            out.update(ond_score=o.get("s"), ond_level=o.get("l"), ond_flag=o.get("f"))
+        a = self.aed or {}
+        if a.get("st") == "ok":
+            out.update(ae_score=a.get("s"), ae_master=a.get("m"),
+                       ae_level=a.get("l"), ae_flag=a.get("f"))
+        return out
+
     def keep_left(self) -> int:
         """seconds a lost finger has to come back and continue this window."""
         if self.contact or self.lost_since is None or not self.buf:
@@ -780,6 +797,7 @@ class Device:
             "last_seen": None if stale is None else round(stale, 1),
             "calib": self.calib.status() if self.calib else None,
             "ond": self.ond,
+            "aed": self.aed,
             "finger": self.finger,
             "keep_s": self.keep_left(),
             # seconds since the wearer pressed S1 (the roster lights the card)
@@ -995,6 +1013,7 @@ class Fleet:
                         dev.bpm = m.get("bpm")
                         dev.spo2 = m.get("spo2")
                         dev.ond = m.get("ond")        # None from older firmware
+                        dev.aed = m.get("aed")        # likewise; firmware without the model
                         dev.finger = d.get("finger")  # likewise
                         dev.motion = m.get("motion")  # likewise; None with no IMU
                         # S1 short press: the board counts them. a rise is a press;

@@ -213,6 +213,7 @@ function buildCard(id){
     <div class="verdict js-verdict"></div>
     <div class="qual js-qual"></div>
     <div class="qual js-ond"></div>
+    <div class="qual js-aed"></div>
     <div class="why js-why"></div>
     <div class="bar"><div class="js-fill"></div></div>
     <div class="vitals">
@@ -234,7 +235,7 @@ function buildCard(id){
              fill:q('fill'), bpm:q('bpm'), spo2:q('spo2'), contact:q('contact'), motion:q('motion'),
              actions:q('actions'), hist:q('hist'), histTitle:q('histtitle'),
              clear:q('clear'),
-             qual:q('qual'), ond:q('ond'), stale:q('stale'),
+             qual:q('qual'), ond:q('ond'), aed:q('aed'), stale:q('stale'),
              renameDev:q('rename-dev'), renameSub:q('rename-sub'),
              ident:q('ident'), press:q('press'),
              delSub:q('del-sub'), subjSig:null};
@@ -316,6 +317,15 @@ function updateCard(d){
   setText(c.ond, !o ? '' : 'on-device: ' + o.st
     + (o.l != null ? ' · ' + Math.round(o.l * 100) + '%' + (o.f ? ' FLAG' : '') : '')
     + (o.st === 'ok' || o.st === 'hold' ? ' · ' + o.ms + ' ms' : ''));
+  // the board's own run of the autoencoder: this card's score, worked out on
+  // the board. a shadow: it never sets the verdict. absent on older firmware.
+  const a = d.aed;
+  const aeWords = {wait: 'waiting for a clean minute', loading: 'loading',
+                   fail: 'self-test failed', off: 'off', none: 'not in this firmware'};
+  setText(c.aed, !a ? '' : 'on-board AI: ' + (a.st === 'ok'
+      ? (a.l != null ? Math.round(a.l * 100) + '%' + (a.f ? ' FLAG' : '') : 'warming up')
+        + ' · ' + a.ms + ' ms'
+      : (aeWords[a.st] || a.st)));
   // while the finger is being checked the bar shows the check, not a level
   const fc = !d.contact && d.finger && d.finger.st === 'check' ? d.finger : null;
   c.fill.style.width = fc ? Math.round(100 * Math.min(1, fc.n / Math.max(1, fc.of))) + '%' : pct + '%';

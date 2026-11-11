@@ -35,7 +35,7 @@ import time
 DEFAULT_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "pulse.db")
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 KINDS = ("calibration", "monitor", "protocol")
 PHASES = ("baseline", "induction", "recovery")
@@ -121,6 +121,14 @@ CREATE TABLE reading (
   spo2          REAL,
   contact       INTEGER,
   quality       REAL,                          -- 0-1 from anomaly.quality
+  -- what the board said itself, same second (NULL if it did not score):
+  ond_score     REAL,                          -- its own detector: HR (+ motion)
+  ond_level     REAL,
+  ond_flag      INTEGER,
+  ae_score      REAL,                          -- its own run of the autoencoder
+  ae_master     REAL,                          -- the master's score, worked out on it
+  ae_level      REAL,
+  ae_flag       INTEGER,
   PRIMARY KEY (session_id, t)
 );
 
@@ -241,6 +249,14 @@ class Db:
                 # v8: drop that table from any store an unreleased build migrated
                 self.con.execute("DROP TABLE IF EXISTS checkin")
                 v = 8
+            if v == 8:
+                # v9: what the board said itself each second, beside the master
+                for col, typ in (("ond_score", "REAL"), ("ond_level", "REAL"),
+                                 ("ond_flag", "INTEGER"), ("ae_score", "REAL"),
+                                 ("ae_master", "REAL"), ("ae_level", "REAL"),
+                                 ("ae_flag", "INTEGER")):
+                    self.con.execute("ALTER TABLE reading ADD COLUMN %s %s" % (col, typ))
+                v = 9
             self.con.execute("PRAGMA user_version=%d" % v)
             self.con.commit()
 
@@ -469,13 +485,17 @@ class Db:
     # --------------------------------------------------------------- readings
 
     def add_reading(self, session_id: int, score=None, level=None, flag=None,
-                    bpm=None, spo2=None, contact=None, quality=None, t=None):
+                    bpm=None, spo2=None, contact=None, quality=None, t=None,
+                    ond_score=None, ond_level=None, ond_flag=None,
+                    ae_score=None, ae_master=None, ae_level=None, ae_flag=None):
+        i = lambda v: None if v is None else int(v)
         self._w("""INSERT OR REPLACE INTO reading
-                     (session_id, t, score, level, flag, bpm, spo2, contact, quality)
-                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                     (session_id, t, score, level, flag, bpm, spo2, contact, quality,
+                      ond_score, ond_level, ond_flag, ae_score, ae_master, ae_level, ae_flag)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (session_id, t or time.time(), score, level,
-                 None if flag is None else int(flag), bpm, spo2,
-                 None if contact is None else int(contact), quality))
+                 i(flag), bpm, spo2, i(contact), quality,
+                 ond_score, ond_level, i(ond_flag), ae_score, ae_master, ae_level, i(ae_flag)))
 
     def readings(self, session_id: int, limit: int = 5000) -> list:
         return self.q("SELECT * FROM reading WHERE session_id=? ORDER BY t LIMIT ?",

@@ -665,6 +665,13 @@ class App:
         self._btn(row, "Export", self.refit_board,
                   when=lambda: self.ready() and not self.is_running("export"))
 
+        row = self._section(f, "Autoencoder on the board", "Writes pulse_headless/ae_model.h (needs "
+                                                           "anomaly/saved/ae.keras + WESAD). Re-upload after, "
+                                                           "with the big-app partitions (see HANDOFF.md).")
+        self._btn(row, "Export autoencoder", lambda: self.run(
+            "aeexport", "Export on-board autoencoder", ["-m", "anomaly.board_ae_export"]),
+            when=lambda: self.ready() and not self.is_running("aeexport"))
+
         row = self._section(f, "Experiments", "No hardware: heart rate alone vs heart rate "
                                               "in the context of motion, on WESAD and PPG-DaLiA (needs both folders).")
         self._btn(row, "HR vs HR + motion", lambda: self.run(

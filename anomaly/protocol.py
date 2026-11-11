@@ -263,6 +263,9 @@ class ProtocolRun:
         ond = getattr(d, "ond", None) or {}
         if ond.get("st") not in ("ok", "hold"):      # no score from the board this second
             ond = {}
+        aed = getattr(d, "aed", None) or {}
+        if aed.get("st") != "ok":                    # no fresh autoencoder score on the board
+            aed = {}
         self.rows.append((
             self.clock(), self.phase, _f(raw_score),
             _f(d.score) if d.ema is not None else math.nan,
@@ -270,7 +273,11 @@ class ProtocolRun:
             _f(d.bpm), _f(d.spo2), int(bool(d.contact)), _f(d.quality), d.state or "",
             # the board's OWN detector, which rides along in every frame: the
             # on-device model scored on the same session as the host's
-            _f(ond.get("s")), _f(ond.get("l")), int(ond.get("f") or 0) if ond else -1))
+            _f(ond.get("s")), _f(ond.get("l")), int(ond.get("f") or 0) if ond else -1,
+            # and the board's own run of the autoencoder: its raw score, the
+            # master's score worked out on the board, and that score's level
+            _f(aed.get("s")), _f(aed.get("m")), _f(aed.get("l")),
+            int(aed.get("f") or 0) if aed else -1))
 
     # ---- the end ----
 
@@ -304,7 +311,7 @@ class ProtocolRun:
     def _save(self) -> str:
         os.makedirs(self.out_dir, exist_ok=True)
         path = os.path.join(self.out_dir, "session_%d.npz" % self.session_id)
-        R = list(zip(*self.rows)) if self.rows else [[] for _ in range(14)]
+        R = list(zip(*self.rows)) if self.rows else [[] for _ in range(18)]
         meta = {"session_id": self.session_id, "subject": self.subject_code,
                 "device": self.dev.id, "plan": self.plan, "task": self.task,
                 "notes": self.notes, "freeze": self.freeze, "record_raw": self.record_raw,
@@ -323,6 +330,8 @@ class ProtocolRun:
             state=np.asarray(R[10], dtype=str),
             ond_score=np.asarray(R[11], np.float64), ond_level=np.asarray(R[12], np.float64),
             ond_flag=np.asarray(R[13], np.int8),
+            aed_score=np.asarray(R[14], np.float64), aed_master=np.asarray(R[15], np.float64),
+            aed_level=np.asarray(R[16], np.float64), aed_flag=np.asarray(R[17], np.int8),
             mark_t=np.asarray([m[0] for m in self.marks], np.float64),
             mark_phase=np.asarray([m[1] for m in self.marks], dtype=str),
             raw_t=np.asarray(self.raw_t, np.float64),
@@ -373,6 +382,9 @@ def load_session(db: Db, sid: int) -> dict:
             out[k] = z[k]
         if "ond_score" in z.files:             # sessions from before the board scored
             out["ond_score"] = z["ond_score"]
+        for k in ("aed_score", "aed_master"):  # sessions from boards running the autoencoder
+            if k in z.files:
+                out[k] = z[k]
         out["n_raw"] = int(z["raw_bvp"].size)
         for k in ("raw_t", "raw_bvp", "raw_contact"):
             out[k] = z[k]
@@ -473,6 +485,8 @@ def analyse(S: dict) -> dict:
         sc = score[pure & np.isfinite(score)]
         ond = S.get("ond_score")
         osc = ond[pure & np.isfinite(ond)] if ond is not None else np.array([])
+        aem = S.get("aed_master")
+        asc = aem[pure & np.isfinite(aem)] if aem is not None else np.array([])
         hr = S["bpm"][inp]
         hr = hr[np.isfinite(hr) & (hr >= 35) & (hr <= 220)]
         lv = S["level"][pure]
@@ -483,6 +497,7 @@ def analyse(S: dict) -> dict:
             "contact": float(S["contact"][inp].mean()) if inp.any() else math.nan,
             "n_pure": int(pure.sum()), "scores": sc, "n_scored": int(sc.size),
             "ond_scores": osc,
+            "aed_scores": asc,
             "hr": float(np.median(hr)) if hr.size else math.nan,
             "score": float(np.median(sc)) if sc.size else math.nan,
             "level": float(np.nanmean(lv)) if np.isfinite(lv).any() else math.nan,
@@ -494,7 +509,8 @@ def analyse(S: dict) -> dict:
     A["dhr"] = (i["hr"] - b["hr"]) if (b and i) else math.nan
     A["auc"] = A["recall90"] = A["recovery_above"] = A["ttf"] = math.nan
     A["ond_auc"] = A["ond_recall90"] = math.nan
-    ok = bool(b and i and b["n_scored"] >= MIN_WINDOWS and i["n_scored"] >= MIN_WINDOWS)
+    A["aed_auc"] = A["aed_recall90"] = math.nan
+    ok =bool(b and i and b["n_scored"] >= MIN_WINDOWS and i["n_scored"] >= MIN_WINDOWS)
     if ok:
         A["auc"] = auroc(b["scores"], i["scores"])
         thr = float(np.quantile(b["scores"], 0.90))
@@ -507,6 +523,13 @@ def analyse(S: dict) -> dict:
         A["ond_auc"] = auroc(b["ond_scores"], i["ond_scores"])
         othr = float(np.quantile(b["ond_scores"], 0.90))
         A["ond_recall90"] = float(np.mean(i["ond_scores"] > othr))
+    # the master's score as the board worked it out with its own autoencoder.
+    # the AE part refreshes every 5 s and is held between, so neighbouring
+    # seconds repeat it; the rule is the same as for every other row
+    if b and i and b["aed_scores"].size >= MIN_WINDOWS and i["aed_scores"].size >= MIN_WINDOWS:
+        A["aed_auc"] = auroc(b["aed_scores"], i["aed_scores"])
+        athr = float(np.quantile(b["aed_scores"], 0.90))
+        A["aed_recall90"] = float(np.mean(i["aed_scores"] > athr))
     # every re-scored detector, by the same rule on the same pure windows
     A["detectors"] = {}
     need = max(6, int(MIN_WINDOWS / RESCORE_STEP))
@@ -581,6 +604,9 @@ def print_session(S: dict, A: dict):
     if not math.isnan(A["ond_auc"]):
         print("  on-device model    AUROC %s, recall@90spec %s (the board's own heart-rate "
               "detector, beside the host's)" % (_fmt(A["ond_auc"]), _fmt(A["ond_recall90"])))
+    if not math.isnan(A["aed_auc"]):
+        print("  on-board AE        AUROC %s, recall@90spec %s (the master's score worked out on "
+              "the board with its own autoencoder)" % (_fmt(A["aed_auc"]), _fmt(A["aed_recall90"])))
     for name, (auc, rec, nb, ni) in A.get("detectors", {}).items():
         print("  re-scored          %-18s AUROC %s, recall@90spec %s (%d baseline / %d induction "
               "windows)" % (name, _fmt(auc), _fmt(rec), nb, ni))

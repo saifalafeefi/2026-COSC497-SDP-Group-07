@@ -134,6 +134,17 @@ For the Rev F wearable the module is an **ESP32-S3-WROOM-1-N8R8** (marking
 (64Mb)` with `Partition Scheme: 8M with spiffs (3MB APP/1.5MB SPIFFS)` or
 `default_8MB`, and keep `PSRAM: OPI PSRAM` — the detector still needs it.
 
+**the autoencoder on the board (pulse_headless).** the master's own model now
+runs on the board too, every 5 s on the detector's cleaned window, as a shadow:
+frames carry `aed`, `/health` carries `ae aesc am alv aflag ams aen aestk`, and
+the verdict is unchanged. `python -m anomaly.board_ae_export` writes the model
+as `pulse_headless/ae_model.h` (14 MB, gitignored; without it the sketch builds
+as before). with it the sketch is 5.5 MB, so `pulse_headless/partitions.csv`
+gives one 7.9 MB app slot (nvs where it was: WiFi and the slider survive), and
+arduino-cli needs `--build-property upload.maximum_size=8257536` on compile.
+the first compile takes ~6 min. on the Rev F board: self-test 0 LSB vs the PC,
+~445 ms a run with WiFi busy (256 ms bare), heap 167 KB free, sampling unchanged.
+
 **the slider survives a reboot.** the board owns the sensitivity slider and the
 master copies what it reports, so when the board kept it only in RAM every
 reboot or reflash reset it to 0.5 and the master followed, losing the line a
